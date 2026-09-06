@@ -26,6 +26,8 @@ namespace CodexUsageViewer
             if (args != null && args.Length > 0 && args[0] == "--shot")
             {
                 MainForm.AutoShotPath = (args.Length > 1) ? args[1] : null;
+                int sv;
+                MainForm.AutoShotView = (args.Length > 2 && Int32.TryParse(args[2], out sv)) ? sv : -1;
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new MainForm());
@@ -51,6 +53,7 @@ namespace CodexUsageViewer
         public long Output;
         public long Reasoning;
         public long Total;
+        public string Model;      // 调用的模型，如 deepseek-v4-flash / claude-sonnet-4
     }
 
     class AgentTask
@@ -87,6 +90,20 @@ namespace CodexUsageViewer
         public string Name;
         public long Total, Input, Output, Cached, Reasoning;
         public int Turns;
+    }
+
+    class ModelAgg
+    {
+        public string Model;
+        public long Total, Input, Output, Cached, Reasoning;
+        public int Calls;
+    }
+
+    class TrendPoint
+    {
+        public DateTime T;
+        public long Total, Input, Output, Cached, Reasoning;
+        public int Calls;
     }
 
     // ---------- 数据加载 v1.3：多 AI Agent ----------
@@ -174,6 +191,7 @@ namespace CodexUsageViewer
             foreach (string file in files)
             {
                 HashSet<string> doneTurns = new HashSet<string>();
+                string curModel = null;
                 try
                 {
                     using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -190,11 +208,16 @@ namespace CodexUsageViewer
                             catch { continue; }
                             if (root == null) continue;
                             string type = GetStr(root, "type");
+                            string md = null;
+                            if (type == "world_state" || type == "session_meta")
+                                md = TryExtractModel(root, type);
+                            if (!String.IsNullOrEmpty(md)) curModel = md;
 
                             if (type == "token_usage_record")
                             {
                                 UsageRecord rec = ParseCodexRec(root);
                                 if (rec == null) continue;
+                                rec.Model = curModel ?? "unknown";
                                 string key = String.IsNullOrEmpty(rec.ResponseId) ? (rec.TurnId + "|" + rec.Time.Ticks.ToString()) : rec.ResponseId;
                                 if (!seen.Add(key)) continue;
                                 data.Records.Add(rec);
@@ -331,6 +354,7 @@ namespace CodexUsageViewer
                                 if (rec == null) continue;
                                 rec.Agent = "Claude";
                                 rec.ThreadId = file;
+                                rec.Model = GetStr(root, "model") ?? "claude";
                                 data.Records.Add(rec);
                                 agentSet.Add("Claude");
                             }
@@ -390,6 +414,9 @@ namespace CodexUsageViewer
                 rec.Time = ParseTime(GetStr(root, "timestamp"));
                 rec.Agent = "Claude";
                 rec.ThreadId = file;
+                object mobj;
+                string mm = (msg != null && msg.TryGetValue("model", out mobj) && mobj != null) ? mobj.ToString() : GetStr(root, "model");
+                rec.Model = String.IsNullOrEmpty(mm) ? "claude" : mm;
                 rec.TurnId = GetStr(root, "parentUuid") ?? "";
                 object mid;
                 rec.ResponseId = (msg != null && msg.TryGetValue("id", out mid) && mid != null) ? mid.ToString() : "";
@@ -426,6 +453,43 @@ namespace CodexUsageViewer
         static bool IsUserPrompt(Dictionary<string, object> root)
         {
             return FirstUserText(root) != null;
+        }
+
+        static string TryExtractModel(Dictionary<string, object> root, string type)
+        {
+            try
+            {
+                Dictionary<string, object> payload = GetDict(root, "payload");
+                if (payload == null) return null;
+                if (type == "world_state")
+                {
+                    Dictionary<string, object> state = GetDict(payload, "state");
+                    if (state != null)
+                    {
+                        Dictionary<string, object> cm = GetDict(state, "collaboration_mode");
+                        if (cm != null)
+                        {
+                            string m = GetStr(cm, "model");
+                            if (!String.IsNullOrEmpty(m)) return m;
+                        }
+                    }
+                }
+                else if (type == "session_meta")
+                {
+                    Dictionary<string, object> bi = GetDict(payload, "base_instructions");
+                    if (bi != null)
+                    {
+                        Dictionary<string, object> pv = GetDict(bi, "provenance");
+                        if (pv != null)
+                        {
+                            string m = GetStr(pv, "model");
+                            if (!String.IsNullOrEmpty(m)) return m;
+                        }
+                    }
+                }
+                return null;
+            }
+            catch { return null; }
         }
 
         static DateTime ParseTime(string ts)
@@ -510,7 +574,7 @@ namespace CodexUsageViewer
                 {
                     a = new ThreadAgg(); a.Agent = r.Agent; a.ThreadId = r.ThreadId;
                     string nm;
-                    a.Name = (d.ThreadNames.TryGetValue(key, out nm) && !String.IsNullOrEmpty(nm)) ? nm : ShortId(r.ThreadId);
+                    a.Name = (d.ThreadNames.TryGetValue(key, out nm) && !String.IsNullOrEmpty(nm)) ? nm : ShortId(TrimAgentPrefix(r.ThreadId, r.Agent));
                     map[key] = a;
                 }
                 a.Input += r.Input; a.Output += r.Output; a.Cached += r.Cached; a.Reasoning += r.Reasoning;
@@ -518,6 +582,43 @@ namespace CodexUsageViewer
             }
             List<ThreadAgg> list = map.Values.ToList();
             list.Sort((x, y) => y.Total.CompareTo(x.Total));
+            return list;
+        }
+
+        public static List<ModelAgg> AggregateByModel(UsageData d)
+        {
+            Dictionary<string, ModelAgg> map = new Dictionary<string, ModelAgg>();
+            foreach (UsageRecord r in d.Records)
+            {
+                string key = String.IsNullOrEmpty(r.Model) ? "(未知模型)" : r.Model;
+                ModelAgg a;
+                if (!map.TryGetValue(key, out a)) { a = new ModelAgg(); a.Model = key; map[key] = a; }
+                a.Input += r.Input; a.Output += r.Output; a.Cached += r.Cached; a.Reasoning += r.Reasoning;
+                a.Total += r.Total; a.Calls++;
+            }
+            List<ModelAgg> list = map.Values.ToList();
+            list.Sort((x, y) => y.Total.CompareTo(x.Total));
+            return list;
+        }
+
+        public static List<TrendPoint> AggregateTrend(UsageData d)
+        {
+            List<TrendPoint> list = new List<TrendPoint>();
+            if (d == null || d.Records.Count == 0) return list;
+            TimeSpan span = d.MaxTime - d.MinTime;
+            bool hourly = span <= TimeSpan.FromDays(4);
+            Dictionary<long, TrendPoint> map = new Dictionary<long, TrendPoint>();
+            foreach (UsageRecord r in d.Records)
+            {
+                DateTime lt = r.Time.ToLocalTime();
+                DateTime key = hourly ? new DateTime(lt.Year, lt.Month, lt.Day, lt.Hour, 0, 0) : lt.Date;
+                TrendPoint p;
+                if (!map.TryGetValue(key.Ticks, out p)) { p = new TrendPoint(); p.T = key; map[key.Ticks] = p; }
+                p.Input += r.Input; p.Output += r.Output; p.Cached += r.Cached; p.Reasoning += r.Reasoning;
+                p.Total += r.Total; p.Calls++;
+            }
+            list = map.Values.ToList();
+            list.Sort((x, y) => x.T.CompareTo(y.T));
             return list;
         }
 
@@ -532,7 +633,15 @@ namespace CodexUsageViewer
             string key = agent + "|" + threadId;
             string nm;
             if (d.ThreadNames.TryGetValue(key, out nm) && !String.IsNullOrEmpty(nm)) return nm;
-            return ShortId(threadId);
+            return ShortId(TrimAgentPrefix(threadId, agent));
+        }
+
+        // 防御：老数据里 threadId 可能已带 "Agent|" 前缀，显示前剥掉，避免出现 "Claude|C..." 这类截断值
+        static string TrimAgentPrefix(string id, string agent)
+        {
+            if (!String.IsNullOrEmpty(id) && !String.IsNullOrEmpty(agent) && id.StartsWith(agent + "|"))
+                return id.Substring(agent.Length + 1);
+            return id;
         }
 
         public static string BuildReport(UsageData d)
@@ -640,6 +749,7 @@ namespace CodexUsageViewer
         string _title = "";
         int _hover = -1;
         double _anim = 1.0;
+        bool _lineMode = false;
         Timer _timer;
         static readonly Color C_TOP = Color.FromArgb(255, 110, 168, 255);
         static readonly Color C_BOT = Color.FromArgb(255, 79, 124, 255);
@@ -661,11 +771,12 @@ namespace CodexUsageViewer
             };
         }
 
-        public void SetItems(IEnumerable<ChartItem> items, string title)
+        public void SetItems(IEnumerable<ChartItem> items, string title, bool line = false)
         {
             _items = (items == null) ? new List<ChartItem>() : new List<ChartItem>(items);
             _title = title ?? "";
             _hover = -1;
+            _lineMode = line;
             _anim = 0.0;
             _timer.Start();
             Invalidate();
@@ -759,6 +870,11 @@ namespace CodexUsageViewer
                 }
             }
 
+            if (_lineMode)
+            {
+                DrawLineChart(g, plot, topV);
+                return;
+            }
             // 柱子（含生长动画）
             float slot = plot.Width / _items.Count;
             float barW = Math.Min(slot * 0.62f, 62f);
@@ -818,6 +934,86 @@ namespace CodexUsageViewer
                         {
                             g.FillPath(bg, p);
                             g.DrawString(t1, tipFont, wb, tx + 10, ty + 7);
+                            using (SolidBrush sub = new SolidBrush(Color.FromArgb(255, 255, 214, 150)))
+                                g.DrawString(t2, tipFont, sub, tx + 10, ty + 7 + s1.Height);
+                        }
+                    }
+                }
+            }
+        }
+        void DrawLineChart(Graphics g, RectangleF plot, long topV)
+        {
+            if (_items.Count == 0 || topV <= 0) return;
+            float slot = plot.Width / _items.Count;
+            PointF[] pts = new PointF[_items.Count];
+            float baseY = plot.Bottom;
+            float maxX = plot.X;
+            for (int i = 0; i < _items.Count; i++)
+            {
+                float cx = plot.X + slot * i + slot / 2f;
+                float h = (float)((double)_items[i].Value / topV) * plot.Height;
+                float y = baseY - h;
+                pts[i] = new PointF(cx, y);
+                maxX = cx;
+            }
+            // 面积渐变
+            using (GraphicsPath area = new GraphicsPath())
+            {
+                area.AddLine(pts[0].X, baseY, pts[0].X, pts[0].Y);
+                for (int i = 1; i < pts.Length; i++) area.AddLine(pts[i - 1], pts[i]);
+                area.AddLine(pts[pts.Length - 1], new PointF(maxX, baseY));
+                area.CloseFigure();
+                RectangleF rc = new RectangleF(plot.X, pts.Min(p => p.Y), plot.Width, baseY - pts.Min(p => p.Y));
+                using (LinearGradientBrush br = new LinearGradientBrush(rc, Color.FromArgb(90, 79, 124, 255), Color.FromArgb(10, 79, 124, 255), 90f))
+                    g.FillPath(br, area);
+            }
+            // 折线
+            using (Pen linePen = new Pen(Color.FromArgb(255, 79, 124, 255), 2.4f))
+                g.DrawLines(linePen, pts);
+            // 点 + X 轴标签 + tooltip
+            int labelEvery = (int)Math.Ceiling(_items.Count / 12.0);
+            if (labelEvery < 1) labelEvery = 1;
+            using (Font labelFont = Ui.F(8.5f, false))
+            using (Font tipFont = Ui.F(9f, false))
+            using (SolidBrush labBrush = new SolidBrush(Color.FromArgb(255, 120, 134, 156)))
+            {
+                for (int i = 0; i < _items.Count; i++)
+                {
+                    bool hot = (i == _hover);
+                    float r = hot ? 5.5f : 3.5f;
+                    using (SolidBrush dot = new SolidBrush(hot ? Color.FromArgb(255, 255, 154, 44) : Color.White))
+                    using (Pen dp = new Pen(Color.FromArgb(255, 79, 124, 255), 2f))
+                    {
+                        g.FillEllipse(dot, pts[i].X - r, pts[i].Y - r, r * 2, r * 2);
+                        g.DrawEllipse(dp, pts[i].X - r, pts[i].Y - r, r * 2, r * 2);
+                    }
+                    if (i % labelEvery == 0)
+                    {
+                        string lab = _items[i].Label;
+                        if (lab.Length > 12) lab = lab.Substring(0, 12) + "…";
+                        SizeF sz = g.MeasureString(lab, labelFont);
+                        float lx = pts[i].X - sz.Width / 2f;
+                        lx = Math.Max(plot.X, Math.Min(plot.Right - sz.Width, lx));
+                        g.DrawString(lab, labelFont, labBrush, lx, plot.Bottom + 10);
+                    }
+                    if (hot)
+                    {
+                        string t1 = _items[i].Label;
+                        string t2 = _items[i].Value.ToString("N0") + " tokens";
+                        SizeF s1 = g.MeasureString(t1, tipFont);
+                        SizeF s2 = g.MeasureString(t2, tipFont);
+                        float tw = Math.Max(s1.Width, s2.Width) + 20;
+                        float th = s1.Height + s2.Height + 14;
+                        float tx = pts[i].X - tw / 2f;
+                        tx = Math.Max(plot.X, Math.Min(Width - tw - 8, tx));
+                        float ty = pts[i].Y - th - 12;
+                        if (ty < 34) ty = pts[i].Y + 12;
+                        RectangleF tip = new RectangleF(tx, ty, tw, th);
+                        using (GraphicsPath p = Ui.Round(tip, 8f))
+                        using (SolidBrush bg = new SolidBrush(Color.FromArgb(242, 30, 41, 59)))
+                        {
+                            g.FillPath(bg, p);
+                            g.DrawString(t1, tipFont, Brushes.White, tx + 10, ty + 7);
                             using (SolidBrush sub = new SolidBrush(Color.FromArgb(255, 255, 214, 150)))
                                 g.DrawString(t2, tipFont, sub, tx + 10, ty + 7 + s1.Height);
                         }
@@ -1043,6 +1239,7 @@ namespace CodexUsageViewer
     class MainForm : Form
     {
         public static string AutoShotPath;
+        public static int AutoShotView = -1;
 
         UsageData _data;
         UsageData _fullData;
@@ -1112,7 +1309,7 @@ namespace CodexUsageViewer
             titleBar.Controls.Add(appTitle);
 
             Label ver = new Label();
-            ver.Text = "v1.3.3";
+            ver.Text = "v1.4";
             ver.Font = Ui.F(8.5f, false);
             ver.ForeColor = Color.FromArgb(255, 79, 124, 255);
             ver.AutoSize = true;
@@ -1206,7 +1403,7 @@ namespace CodexUsageViewer
             root.Controls.Add(tools, 0, 3);
 
             Label lv = new Label(); lv.Text = "视图"; lv.Font = Ui.F(9f, true); lv.ForeColor = SUB; lv.AutoSize = true; lv.Location = new Point(26, 16);
-            _cboView = MakeCombo(new object[] { "按天", "按会话" });
+            _cboView = MakeCombo(new object[] { "按天", "按会话", "趋势", "按模型" });
             _cboView.Location = new Point(70, 10); _cboView.Width = 104;
             Label lm = new Label(); lm.Text = "指标"; lm.Font = Ui.F(9f, true); lm.ForeColor = SUB; lm.AutoSize = true; lm.Location = new Point(200, 16);
             _cboMetric = MakeCombo(new object[] { "总 Tokens", "输入", "输出", "缓存读取", "推理 tokens" });
@@ -1364,6 +1561,7 @@ namespace CodexUsageViewer
         {
             ApplyRegion();
             LoadData();
+            if (MainForm.AutoShotView >= 0 && _cboView.Items.Count > MainForm.AutoShotView) _cboView.SelectedIndex = MainForm.AutoShotView;
             if (!String.IsNullOrEmpty(AutoShotPath))
             {
                 try
@@ -1490,7 +1688,8 @@ namespace CodexUsageViewer
             int view = _cboView.SelectedIndex;
             int metric = _cboMetric.SelectedIndex;
             List<ChartItem> items = new List<ChartItem>();
-            string title = _cboMetric.Text + "用量";
+            string title = _cboMetric.Text;
+            bool line = false;
 
             if (view == 0)
             {
@@ -1498,13 +1697,12 @@ namespace CodexUsageViewer
                 for (int i = 0; i < days.Count; i++)
                 {
                     DayAgg a = days[i];
-                    long v = PickDay(a, metric);
                     string lab = (days.Count > 14) ? a.Day.ToString("MM-dd") : a.Day.ToString("M月d日");
-                    items.Add(new ChartItem(lab, v));
+                    items.Add(new ChartItem(lab, PickDay(a, metric)));
                 }
                 title = "按天 · " + _cboMetric.Text;
             }
-            else
+            else if (view == 1)
             {
                 foreach (ThreadAgg a in UsageLoader.AggregateByThread(_data))
                 {
@@ -1513,7 +1711,26 @@ namespace CodexUsageViewer
                 }
                 title = "按会话 · " + _cboMetric.Text;
             }
-            _chart.SetItems(items, title);
+            else if (view == 2)
+            {
+                List<TrendPoint> tr = UsageLoader.AggregateTrend(_data);
+                bool multiDay = tr.Count > 0 && (tr[tr.Count - 1].T.Date != tr[0].T.Date);
+                for (int i = 0; i < tr.Count; i++)
+                {
+                    TrendPoint p = tr[i];
+                    string lab = multiDay ? p.T.ToString("MM-dd") : p.T.ToString("HH:mm");
+                    items.Add(new ChartItem(lab, PickTrend(p, metric)));
+                }
+                title = "趋势 · " + _cboMetric.Text;
+                line = true;
+            }
+            else
+            {
+                foreach (ModelAgg a in UsageLoader.AggregateByModel(_data))
+                    items.Add(new ChartItem(a.Model, PickModel(a, metric)));
+                title = "按模型 · " + _cboMetric.Text;
+            }
+            _chart.SetItems(items, title, line);
         }
 
         long PickDay(DayAgg a, int metric)
@@ -1524,19 +1741,28 @@ namespace CodexUsageViewer
         {
             switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
         }
+        long PickModel(ModelAgg a, int metric)
+        {
+            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
+        }
+        long PickTrend(TrendPoint a, int metric)
+        {
+            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
+        }
 
         void FillGrid()
         {
             _grid.SuspendLayout();
             _grid.Columns.Clear();
-            AddCol("agent", "Agent", 55, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("time", "时间", 135, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("thread", "会话", 215, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("inp", "输入", 75, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("cached", "缓存读取", 80, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("out", "输出", 75, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("reason", "推理", 75, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("total", "总量", 85, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("agent", "Agent", 48, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("model", "模型", 95, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("time", "时间", 125, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("thread", "会话", 185, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("inp", "输入", 65, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("cached", "缓存读取", 70, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("out", "输出", 65, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("reason", "推理", 65, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("total", "总量", 75, DataGridViewContentAlignment.MiddleRight, true);
 
             List<UsageRecord> sorted = new List<UsageRecord>();
             if (_data != null)
@@ -1549,13 +1775,14 @@ namespace CodexUsageViewer
                 {
                     int i = _grid.Rows.Add();
                     _grid.Rows[i].Cells[0].Value = r.Agent;
-                    _grid.Rows[i].Cells[1].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-                    _grid.Rows[i].Cells[2].Value = UsageLoader.ThreadLabel(_data, r.Agent, r.ThreadId);
-                    _grid.Rows[i].Cells[3].Value = r.Input.ToString("N0");
-                    _grid.Rows[i].Cells[4].Value = r.Cached.ToString("N0");
-                    _grid.Rows[i].Cells[5].Value = r.Output.ToString("N0");
-                    _grid.Rows[i].Cells[6].Value = r.Reasoning.ToString("N0");
-                    _grid.Rows[i].Cells[7].Value = r.Total.ToString("N0");
+                    _grid.Rows[i].Cells[1].Value = String.IsNullOrEmpty(r.Model) ? "?" : r.Model;
+                    _grid.Rows[i].Cells[2].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                    _grid.Rows[i].Cells[3].Value = UsageLoader.ThreadLabel(_data, r.Agent, r.ThreadId);
+                    _grid.Rows[i].Cells[4].Value = r.Input.ToString("N0");
+                    _grid.Rows[i].Cells[5].Value = r.Cached.ToString("N0");
+                    _grid.Rows[i].Cells[6].Value = r.Output.ToString("N0");
+                    _grid.Rows[i].Cells[7].Value = r.Reasoning.ToString("N0");
+                    _grid.Rows[i].Cells[8].Value = r.Total.ToString("N0");
                 }
             }
             _grid.ResumeLayout();
