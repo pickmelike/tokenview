@@ -274,24 +274,14 @@ namespace CodexUsageViewer
             List<string> files = new List<string>();
             try { files.AddRange(Directory.GetFiles(scanRoot, "*.jsonl", SearchOption.AllDirectories)); }
             catch (Exception ex) { data.Errors.Add("Claude 扫描失败: " + ex.Message); return; }
+            // audit.jsonl 是审计日志，会重复记录所有会话，跳过以免重复计数
+            files.RemoveAll(f => String.Equals(Path.GetFileName(f), "audit.jsonl", StringComparison.OrdinalIgnoreCase));
             data.FileCount += files.Count;
-
-            Dictionary<string, string> dirNames = new Dictionary<string, string>();
-            foreach (string file in files)
-            {
-                string dir = Path.GetDirectoryName(file);
-                if (!dirNames.ContainsKey(dir))
-                {
-                    string nm = DecodeDirName(Path.GetFileName(dir));
-                    dirNames[dir] = nm;
-                }
-            }
-            foreach (KeyValuePair<string, string> kv in dirNames)
-                if (!data.ThreadNames.ContainsKey("Claude|" + kv.Key)) data.ThreadNames["Claude|" + kv.Key] = kv.Value;
 
             foreach (string file in files)
             {
                 HashSet<string> seenResp = new HashSet<string>();
+                string firstPrompt = null, customTitle = null, lastPrompt = null;
                 try
                 {
                     using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -308,7 +298,22 @@ namespace CodexUsageViewer
                             catch { continue; }
                             if (root == null) continue;
                             string type = GetStr(root, "type");
-                            string dir = Path.GetDirectoryName(file);
+
+                            // ---- 会话名（对话名）提取 ----
+                            if (type == "custom-title")
+                            {
+                                string ct = GetStr(root, "customTitle");
+                                if (!String.IsNullOrEmpty(ct)) customTitle = ct;
+                            }
+                            else if (type == "last-prompt")
+                            {
+                                string lp = GetStr(root, "lastPrompt");
+                                if (!String.IsNullOrEmpty(lp)) lastPrompt = lp;
+                            }
+                            else if (type == "user" && firstPrompt == null)
+                            {
+                                firstPrompt = FirstUserText(root);
+                            }
 
                             if (type == "assistant")
                             {
@@ -325,7 +330,7 @@ namespace CodexUsageViewer
                                 UsageRecord rec = ParseCodexRec(root);
                                 if (rec == null) continue;
                                 rec.Agent = "Claude";
-                                rec.ThreadId = "Claude|" + dir;
+                                rec.ThreadId = file;
                                 data.Records.Add(rec);
                                 agentSet.Add("Claude");
                             }
@@ -333,7 +338,7 @@ namespace CodexUsageViewer
                             {
                                 AgentTask t = new AgentTask();
                                 t.Agent = "Claude";
-                                t.ThreadId = "Claude|" + dir;
+                                t.ThreadId = file;
                                 t.Time = ParseTime(GetStr(root, "timestamp"));
                                 t.TaskId = GetStr(root, "uuid") ?? GetStr(root, "parentUuid") ?? (Path.GetFileName(file) + "|" + t.Time.Ticks.ToString());
                                 data.Tasks.Add(t);
@@ -348,7 +353,7 @@ namespace CodexUsageViewer
                                     {
                                         AgentTask t = new AgentTask();
                                         t.Agent = "Claude";
-                                        t.ThreadId = "Claude|" + dir;
+                                        t.ThreadId = file;
                                         t.TaskId = turnId;
                                         t.Time = ParseTime(GetStr(root, "timestamp"));
                                         data.Tasks.Add(t);
@@ -359,6 +364,16 @@ namespace CodexUsageViewer
                     }
                 }
                 catch (Exception ex) { data.Errors.Add("Claude 读取失败: " + Path.GetFileName(file) + " -> " + ex.Message); }
+
+                // 会话名：自定义标题 > 首次用户输入 > 最近提示 > 文件名
+                string sname = customTitle ?? firstPrompt ?? lastPrompt;
+                if (!String.IsNullOrEmpty(sname))
+                {
+                    sname = sname.Trim();
+                    if (sname.Length > 40) sname = sname.Substring(0, 40) + "…";
+                }
+                else sname = Path.GetFileNameWithoutExtension(file);
+                data.ThreadNames["Claude|" + file] = sname;
             }
         }
 
@@ -374,7 +389,7 @@ namespace CodexUsageViewer
                 UsageRecord rec = new UsageRecord();
                 rec.Time = ParseTime(GetStr(root, "timestamp"));
                 rec.Agent = "Claude";
-                rec.ThreadId = "Claude|" + Path.GetDirectoryName(file);
+                rec.ThreadId = file;
                 rec.TurnId = GetStr(root, "parentUuid") ?? "";
                 object mid;
                 rec.ResponseId = (msg != null && msg.TryGetValue("id", out mid) && mid != null) ? mid.ToString() : "";
@@ -390,40 +405,29 @@ namespace CodexUsageViewer
             catch { return null; }
         }
 
-        static bool IsUserPrompt(Dictionary<string, object> root)
+        static string FirstUserText(Dictionary<string, object> root)
         {
             try
             {
                 Dictionary<string, object> msg = GetDict(root, "message");
-                if (msg == null) return false;
+                if (msg == null) return null;
                 object content;
-                if (!msg.TryGetValue("content", out content) || content == null) return false;
+                if (!msg.TryGetValue("content", out content) || content == null) return null;
                 if (content is string)
                 {
-                    string s = (string)content;
-                    return s.Trim().Length > 0;
+                    string s = ((string)content).Trim();
+                    return s.Length > 0 ? s : null;
                 }
-                return false;
+                return null;
             }
-            catch { return false; }
+            catch { return null; }
         }
 
-        static string DecodeDirName(string name)
+        static bool IsUserPrompt(Dictionary<string, object> root)
         {
-            if (String.IsNullOrEmpty(name)) return "(项目)";
-            try
-            {
-                string dec = Uri.UnescapeDataString(name.Replace('+', ' ')).Trim();
-                if (dec.Length > 0 && (dec.Contains("\\") || dec.Contains("/") || dec.Contains(":")))
-                {
-                    int li = Math.Max(dec.LastIndexOf('\\'), dec.LastIndexOf('/'));
-                    if (li >= 0 && li < dec.Length - 1) return dec.Substring(li + 1);
-                    return dec;
-                }
-                return name;
-            }
-            catch { return name; }
+            return FirstUserText(root) != null;
         }
+
         static DateTime ParseTime(string ts)
         {
             DateTime t;
@@ -1108,7 +1112,7 @@ namespace CodexUsageViewer
             titleBar.Controls.Add(appTitle);
 
             Label ver = new Label();
-            ver.Text = "v1.3";
+            ver.Text = "v1.3.3";
             ver.Font = Ui.F(8.5f, false);
             ver.ForeColor = Color.FromArgb(255, 79, 124, 255);
             ver.AutoSize = true;
