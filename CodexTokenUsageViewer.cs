@@ -41,6 +41,7 @@ namespace CodexUsageViewer
     class UsageRecord
     {
         public DateTime Time;          // UTC
+        public string Agent;           // "Codex" / "Claude"
         public string ThreadId;
         public string TurnId;
         public string ResponseId;
@@ -52,14 +53,24 @@ namespace CodexUsageViewer
         public long Total;
     }
 
+    class AgentTask
+    {
+        public DateTime Time;
+        public string Agent;
+        public string ThreadId;
+        public string TaskId;
+    }
+
     class UsageData
     {
         public List<UsageRecord> Records = new List<UsageRecord>();
+        public List<AgentTask> Tasks = new List<AgentTask>();
         public Dictionary<string, string> ThreadNames = new Dictionary<string, string>();
         public List<string> Errors = new List<string>();
         public int FileCount;
         public DateTime MinTime = DateTime.MaxValue;
         public DateTime MaxTime = DateTime.MinValue;
+        public int AgentCount;          // 有数据的 agent 种类数
     }
 
     class DayAgg
@@ -71,29 +82,64 @@ namespace CodexUsageViewer
 
     class ThreadAgg
     {
+        public string Agent;
         public string ThreadId;
         public string Name;
         public long Total, Input, Output, Cached, Reasoning;
         public int Turns;
     }
 
-    // ---------- 数据加载 ----------
+    // ---------- 数据加载 v1.3：多 AI Agent ----------
     static class UsageLoader
     {
         public static string DefaultSessionsPath()
         {
+            return Path.Combine(UserRoot(), ".codex", "sessions");
+        }
+
+        static string UserRoot()
+        {
             string root = Environment.GetEnvironmentVariable("USERPROFILE");
             if (String.IsNullOrEmpty(root)) root = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (String.IsNullOrEmpty(root)) root = @"C:\Users\" + Environment.UserName;
-            return Path.Combine(root, ".codex", "sessions");
+            return root;
         }
 
-        public static UsageData LoadAll(string sessionsDir)
+        static string ClaudeProjectsPath()
+        {
+            return Path.Combine(UserRoot(), ".claude", "projects");
+        }
+
+        public static UsageData LoadAll(string codexSessionsDir)
         {
             UsageData data = new UsageData();
-            if (!Directory.Exists(sessionsDir)) { data.Errors.Add("目录不存在: " + sessionsDir); return data; }
+            HashSet<string> agentSet = new HashSet<string>();
 
-            // 线程名映射
+            // ---- Codex ----
+            LoadCodex(codexSessionsDir, data, agentSet);
+            // ---- Claude Code ----
+            // ---- Claude (Code / Desktop / 3p local-agent) ----
+            LoadClaudeAll(data, agentSet);
+
+            data.AgentCount = agentSet.Count;
+            if (data.Records.Count > 0)
+            {
+                data.MinTime = data.Records.Min(r => r.Time);
+                data.MaxTime = data.Records.Max(r => r.Time);
+            }
+            return data;
+        }
+
+        // ================= Codex =================
+        static void LoadCodex(string sessionsDir, UsageData data, HashSet<string> agentSet)
+        {
+            if (sessionsDir == null || !Directory.Exists(sessionsDir))
+            {
+                data.Errors.Add("Codex 目录不存在: " + sessionsDir);
+                return;
+            }
+
+            // 线程名映射 (session_index.jsonl)
             try
             {
                 string idx = Path.Combine(Path.GetDirectoryName(sessionsDir), "session_index.jsonl");
@@ -110,7 +156,7 @@ namespace CodexUsageViewer
                             if (o.TryGetValue("id", out id) && id != null)
                             {
                                 string name = (o.TryGetValue("thread_name", out nm) && nm != null) ? nm.ToString() : "";
-                                data.ThreadNames[id.ToString()] = name;
+                                if (!String.IsNullOrEmpty(name)) data.ThreadNames["Codex|" + id.ToString()] = name;
                             }
                         }
                         catch { }
@@ -119,17 +165,15 @@ namespace CodexUsageViewer
             }
             catch (Exception ex) { data.Errors.Add("读取 session_index 失败: " + ex.Message); }
 
-            // 扫描 rollout 文件
-            HashSet<string> seen = new HashSet<string>();
-            JavaScriptSerializer js = new JavaScriptSerializer();
-            js.MaxJsonLength = int.MaxValue;
             List<string> files = new List<string>();
             try { files.AddRange(Directory.GetFiles(sessionsDir, "rollout-*.jsonl", SearchOption.AllDirectories)); }
-            catch (Exception ex) { data.Errors.Add("扫描目录失败: " + ex.Message); }
-            data.FileCount = files.Count;
+            catch (Exception ex) { data.Errors.Add("Codex 扫描失败: " + ex.Message); }
+            data.FileCount += files.Count;
 
+            HashSet<string> seen = new HashSet<string>();
             foreach (string file in files)
             {
+                HashSet<string> doneTurns = new HashSet<string>();
                 try
                 {
                     using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -139,45 +183,59 @@ namespace CodexUsageViewer
                         while ((line = sr.ReadLine()) != null)
                         {
                             if (line.Length == 0) continue;
-                            UsageRecord rec = TryParse(js, line);
-                            if (rec == null) continue;
-                            string key = String.IsNullOrEmpty(rec.ResponseId) ? (rec.TurnId + "|" + rec.Time.Ticks.ToString()) : rec.ResponseId;
-                            if (!seen.Add(key)) continue;   // 去重
-                            data.Records.Add(rec);
+                            JavaScriptSerializer js = new JavaScriptSerializer();
+                            js.MaxJsonLength = int.MaxValue;
+                            Dictionary<string, object> root;
+                            try { root = js.DeserializeObject(line) as Dictionary<string, object>; }
+                            catch { continue; }
+                            if (root == null) continue;
+                            string type = GetStr(root, "type");
+
+                            if (type == "token_usage_record")
+                            {
+                                UsageRecord rec = ParseCodexRec(root);
+                                if (rec == null) continue;
+                                string key = String.IsNullOrEmpty(rec.ResponseId) ? (rec.TurnId + "|" + rec.Time.Ticks.ToString()) : rec.ResponseId;
+                                if (!seen.Add(key)) continue;
+                                data.Records.Add(rec);
+                                agentSet.Add("Codex");
+                            }
+                            else if (type == "event_msg")
+                            {
+                                Dictionary<string, object> payload = GetDict(root, "payload");
+                                if (payload == null) continue;
+                                if (GetStr(payload, "type") == "task_complete")
+                                {
+                                    string turnId = GetStr(payload, "turn_id") ?? "";
+                                    if (turnId.Length > 0 && doneTurns.Add(turnId))
+                                    {
+                                        AgentTask t = new AgentTask();
+                                        t.Agent = "Codex";
+                                        t.ThreadId = GetStr(payload, "thread_id") ?? "";
+                                        t.TaskId = turnId;
+                                        t.Time = ParseTime(GetStr(root, "timestamp"));
+                                        data.Tasks.Add(t);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 catch (Exception ex) { data.Errors.Add("读取文件失败: " + Path.GetFileName(file) + " -> " + ex.Message); }
             }
-
-            if (data.Records.Count > 0)
-            {
-                data.MinTime = data.Records.Min(r => r.Time);
-                data.MaxTime = data.Records.Max(r => r.Time);
-            }
-            return data;
         }
 
-        static UsageRecord TryParse(JavaScriptSerializer js, string line)
+        static UsageRecord ParseCodexRec(Dictionary<string, object> root)
         {
             try
             {
-                Dictionary<string, object> root = js.DeserializeObject(line) as Dictionary<string, object>;
-                if (root == null) return null;
-                object tv;
-                if (!root.TryGetValue("type", out tv) || tv == null || tv.ToString() != "token_usage_record") return null;
-
                 Dictionary<string, object> payload = GetDict(root, "payload");
                 if (payload == null) return null;
                 Dictionary<string, object> usage = GetDict(payload, "usage");
                 if (usage == null) return null;
-
                 UsageRecord rec = new UsageRecord();
-                string ts = GetStr(root, "timestamp");
-                DateTime t;
-                if (!String.IsNullOrEmpty(ts) && DateTime.TryParse(ts, CultureInfo.InvariantCulture,
-                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t)) rec.Time = t;
-                else rec.Time = DateTime.UtcNow;
+                rec.Time = ParseTime(GetStr(root, "timestamp"));
+                rec.Agent = "Codex";
                 rec.ThreadId = GetStr(payload, "thread_id") ?? "";
                 rec.TurnId = GetStr(payload, "turn_id") ?? "";
                 rec.ResponseId = GetStr(payload, "response_id") ?? "";
@@ -192,18 +250,202 @@ namespace CodexUsageViewer
             catch { return null; }
         }
 
+        // ================= Claude Code =================
+        static void LoadClaudeAll(UsageData data, HashSet<string> agentSet)
+        {
+            List<string> roots = new List<string>();
+            roots.Add(Path.Combine(UserRoot(), ".claude", "projects"));
+            roots.Add(Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? @"C:\Users\" + Environment.UserName + @"\AppData\Local", "Claude-3p", "local-agent-mode-sessions"));
+            roots.Add(Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? @"C:\Users\" + Environment.UserName + @"\AppData\Local", "Claude"));
+
+            foreach (string root in roots)
+            {
+                // 目录不可达（无权限/不存在）时静默跳过
+                bool ok;
+                try { ok = Directory.Exists(root); }
+                catch { ok = false; }
+                if (!ok) continue;
+                ScanClaudeRoot(root, data, agentSet);
+            }
+        }
+
+        static void ScanClaudeRoot(string scanRoot, UsageData data, HashSet<string> agentSet)
+        {
+            List<string> files = new List<string>();
+            try { files.AddRange(Directory.GetFiles(scanRoot, "*.jsonl", SearchOption.AllDirectories)); }
+            catch (Exception ex) { data.Errors.Add("Claude 扫描失败: " + ex.Message); return; }
+            data.FileCount += files.Count;
+
+            Dictionary<string, string> dirNames = new Dictionary<string, string>();
+            foreach (string file in files)
+            {
+                string dir = Path.GetDirectoryName(file);
+                if (!dirNames.ContainsKey(dir))
+                {
+                    string nm = DecodeDirName(Path.GetFileName(dir));
+                    dirNames[dir] = nm;
+                }
+            }
+            foreach (KeyValuePair<string, string> kv in dirNames)
+                if (!data.ThreadNames.ContainsKey("Claude|" + kv.Key)) data.ThreadNames["Claude|" + kv.Key] = kv.Value;
+
+            foreach (string file in files)
+            {
+                HashSet<string> seenResp = new HashSet<string>();
+                try
+                {
+                    using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (StreamReader sr = new StreamReader(fs, Encoding.UTF8))
+                    {
+                        string line;
+                        while ((line = sr.ReadLine()) != null)
+                        {
+                            if (line.Length == 0) continue;
+                            JavaScriptSerializer js = new JavaScriptSerializer();
+                            js.MaxJsonLength = int.MaxValue;
+                            Dictionary<string, object> root;
+                            try { root = js.DeserializeObject(line) as Dictionary<string, object>; }
+                            catch { continue; }
+                            if (root == null) continue;
+                            string type = GetStr(root, "type");
+                            string dir = Path.GetDirectoryName(file);
+
+                            if (type == "assistant")
+                            {
+                                UsageRecord rec = ParseClaudeRec(root, file);
+                                if (rec == null) continue;
+                                string rk = rec.ResponseId.Length > 0 ? rec.ResponseId : (rec.TurnId + "|" + rec.Time.Ticks.ToString());
+                                if (!seenResp.Add(rk)) continue;
+                                data.Records.Add(rec);
+                                agentSet.Add("Claude");
+                            }
+                            else if (type == "token_usage_record")
+                            {
+                                // 兼容 Codex 风格 rollout（若 Claude-3p 使用类似结构）
+                                UsageRecord rec = ParseCodexRec(root);
+                                if (rec == null) continue;
+                                rec.Agent = "Claude";
+                                rec.ThreadId = "Claude|" + dir;
+                                data.Records.Add(rec);
+                                agentSet.Add("Claude");
+                            }
+                            else if (type == "user" && IsUserPrompt(root))
+                            {
+                                AgentTask t = new AgentTask();
+                                t.Agent = "Claude";
+                                t.ThreadId = "Claude|" + dir;
+                                t.Time = ParseTime(GetStr(root, "timestamp"));
+                                t.TaskId = GetStr(root, "uuid") ?? GetStr(root, "parentUuid") ?? (Path.GetFileName(file) + "|" + t.Time.Ticks.ToString());
+                                data.Tasks.Add(t);
+                            }
+                            else if (type == "event_msg")
+                            {
+                                Dictionary<string, object> payload = GetDict(root, "payload");
+                                if (payload != null && GetStr(payload, "type") == "task_complete")
+                                {
+                                    string turnId = GetStr(payload, "turn_id") ?? "";
+                                    if (turnId.Length > 0)
+                                    {
+                                        AgentTask t = new AgentTask();
+                                        t.Agent = "Claude";
+                                        t.ThreadId = "Claude|" + dir;
+                                        t.TaskId = turnId;
+                                        t.Time = ParseTime(GetStr(root, "timestamp"));
+                                        data.Tasks.Add(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { data.Errors.Add("Claude 读取失败: " + Path.GetFileName(file) + " -> " + ex.Message); }
+            }
+        }
+
+        static UsageRecord ParseClaudeRec(Dictionary<string, object> root, string file)
+        {
+            try
+            {
+                Dictionary<string, object> msg = GetDict(root, "message");
+                Dictionary<string, object> usage = (msg != null) ? GetDict(msg, "usage") : GetDict(root, "usage");
+                if (usage == null) return null;
+                if (GetLong(usage, "input_tokens") == 0 && GetLong(usage, "output_tokens") == 0) return null;
+
+                UsageRecord rec = new UsageRecord();
+                rec.Time = ParseTime(GetStr(root, "timestamp"));
+                rec.Agent = "Claude";
+                rec.ThreadId = "Claude|" + Path.GetDirectoryName(file);
+                rec.TurnId = GetStr(root, "parentUuid") ?? "";
+                object mid;
+                rec.ResponseId = (msg != null && msg.TryGetValue("id", out mid) && mid != null) ? mid.ToString() : "";
+                rec.Input = GetLong(usage, "input_tokens");
+                rec.Cached = GetLong(usage, "cache_read_input_tokens");
+                rec.CacheWrite = GetLong(usage, "cache_creation_input_tokens");
+                rec.Output = GetLong(usage, "output_tokens");
+                rec.Reasoning = 0;
+                long total = GetLong(usage, "total_tokens");
+                rec.Total = total > 0 ? total : (rec.Input + rec.Output + rec.Cached + rec.CacheWrite);
+                return rec;
+            }
+            catch { return null; }
+        }
+
+        static bool IsUserPrompt(Dictionary<string, object> root)
+        {
+            try
+            {
+                Dictionary<string, object> msg = GetDict(root, "message");
+                if (msg == null) return false;
+                object content;
+                if (!msg.TryGetValue("content", out content) || content == null) return false;
+                if (content is string)
+                {
+                    string s = (string)content;
+                    return s.Trim().Length > 0;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        static string DecodeDirName(string name)
+        {
+            if (String.IsNullOrEmpty(name)) return "(项目)";
+            try
+            {
+                string dec = Uri.UnescapeDataString(name.Replace('+', ' ')).Trim();
+                if (dec.Length > 0 && (dec.Contains("\\") || dec.Contains("/") || dec.Contains(":")))
+                {
+                    int li = Math.Max(dec.LastIndexOf('\\'), dec.LastIndexOf('/'));
+                    if (li >= 0 && li < dec.Length - 1) return dec.Substring(li + 1);
+                    return dec;
+                }
+                return name;
+            }
+            catch { return name; }
+        }
+        static DateTime ParseTime(string ts)
+        {
+            DateTime t;
+            if (!String.IsNullOrEmpty(ts) && DateTime.TryParse(ts, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t)) return t;
+            return DateTime.UtcNow;
+        }
+
         static string GetStr(Dictionary<string, object> d, string k)
         {
             object v;
             if (d != null && d.TryGetValue(k, out v) && v != null) return v.ToString();
             return null;
         }
+
         static Dictionary<string, object> GetDict(Dictionary<string, object> d, string k)
         {
             object v;
             if (d != null && d.TryGetValue(k, out v) && v is Dictionary<string, object>) return (Dictionary<string, object>)v;
             return null;
         }
+
         static long GetLong(Dictionary<string, object> d, string k)
         {
             object v;
@@ -213,6 +455,27 @@ namespace CodexUsageViewer
                 catch { }
             }
             return 0;
+        }
+
+        // 按记录来源过滤
+        public static UsageData FilterByAgent(UsageData src, string agent)
+        {
+            if (src == null) return null;
+            if (String.IsNullOrEmpty(agent) || agent == "全部") return src;
+            UsageData d = new UsageData();
+            d.ThreadNames = src.ThreadNames;
+            d.FileCount = src.FileCount;
+            d.Errors = src.Errors;
+            foreach (UsageRecord r in src.Records)
+                if (r.Agent == agent) d.Records.Add(r);
+            foreach (AgentTask t in src.Tasks)
+                if (t.Agent == agent) d.Tasks.Add(t);
+            if (d.Records.Count > 0)
+            {
+                d.MinTime = d.Records.Min(r => r.Time);
+                d.MaxTime = d.Records.Max(r => r.Time);
+            }
+            return d;
         }
 
         // 聚合
@@ -237,13 +500,14 @@ namespace CodexUsageViewer
             Dictionary<string, ThreadAgg> map = new Dictionary<string, ThreadAgg>();
             foreach (UsageRecord r in d.Records)
             {
+                string key = r.Agent + "|" + r.ThreadId;
                 ThreadAgg a;
-                if (!map.TryGetValue(r.ThreadId, out a))
+                if (!map.TryGetValue(key, out a))
                 {
-                    a = new ThreadAgg(); a.ThreadId = r.ThreadId;
+                    a = new ThreadAgg(); a.Agent = r.Agent; a.ThreadId = r.ThreadId;
                     string nm;
-                    a.Name = (d.ThreadNames.TryGetValue(r.ThreadId, out nm) && !String.IsNullOrEmpty(nm)) ? nm : ShortId(r.ThreadId);
-                    map[r.ThreadId] = a;
+                    a.Name = (d.ThreadNames.TryGetValue(key, out nm) && !String.IsNullOrEmpty(nm)) ? nm : ShortId(r.ThreadId);
+                    map[key] = a;
                 }
                 a.Input += r.Input; a.Output += r.Output; a.Cached += r.Cached; a.Reasoning += r.Reasoning;
                 a.Total += r.Total; a.Turns++;
@@ -259,26 +523,36 @@ namespace CodexUsageViewer
             return id.Length > 8 ? id.Substring(0, 8) : id;
         }
 
-        public static string ThreadLabel(UsageData d, string threadId)
+        public static string ThreadLabel(UsageData d, string agent, string threadId)
         {
+            string key = agent + "|" + threadId;
             string nm;
-            if (d.ThreadNames.TryGetValue(threadId, out nm) && !String.IsNullOrEmpty(nm)) return nm;
+            if (d.ThreadNames.TryGetValue(key, out nm) && !String.IsNullOrEmpty(nm)) return nm;
             return ShortId(threadId);
         }
 
         public static string BuildReport(UsageData d)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("=== Codex Token Usage Report ===");
-            sb.AppendLine("数据目录: " + DefaultSessionsPath());
+            sb.AppendLine("=== AI Agent Token Usage Report ===");
             sb.AppendLine("扫描文件数: " + d.FileCount.ToString());
             sb.AppendLine("记录数(去重后): " + d.Records.Count.ToString());
+            sb.AppendLine("完成任务数: " + d.Tasks.Count.ToString());
             if (d.Records.Count > 0)
             {
                 sb.AppendLine("时间范围: " + d.MinTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " ~ " + d.MaxTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm"));
                 long tIn = d.Records.Sum(r => r.Input), tOut = d.Records.Sum(r => r.Output), tCached = d.Records.Sum(r => r.Cached), tTotal = d.Records.Sum(r => r.Total);
                 sb.AppendLine("总 Tokens: " + tTotal.ToString("N0"));
+                if (d.Tasks.Count > 0) sb.AppendLine("每任务平均消耗: " + (tTotal / d.Tasks.Count).ToString("N0") + " tokens/任务");
                 sb.AppendLine("输入: " + tIn.ToString("N0") + ", 缓存读取: " + tCached.ToString("N0") + ", 输出: " + tOut.ToString("N0"));
+                sb.AppendLine();
+                sb.AppendLine("--- 按 Agent ---");
+                foreach (string agent in d.Records.Select(r => r.Agent).Distinct())
+                {
+                    long at = d.Records.Where(r => r.Agent == agent).Sum(r => r.Total);
+                    int atk = d.Tasks.Count(t => t.Agent == agent);
+                    sb.AppendLine(agent + " | 总 " + at.ToString("N0") + " | 任务 " + atk.ToString() + " | 每任务 " + (atk > 0 ? (at / atk).ToString("N0") : "-"));
+                }
                 sb.AppendLine();
                 sb.AppendLine("--- 按天 ---");
                 foreach (DayAgg a in AggregateByDay(d))
@@ -286,14 +560,12 @@ namespace CodexUsageViewer
                 sb.AppendLine();
                 sb.AppendLine("--- 按会话 ---");
                 foreach (ThreadAgg a in AggregateByThread(d))
-                    sb.AppendLine((a.Name ?? "") + " | 输入 " + a.Input.ToString("N0") + " | 缓存 " + a.Cached.ToString("N0") + " | 输出 " + a.Output.ToString("N0") + " | 总计 " + a.Total.ToString("N0") + " | 轮次 " + a.Turns.ToString());
+                    sb.AppendLine((a.Agent ?? "") + " | " + (a.Name ?? "") + " | 输入 " + a.Input.ToString("N0") + " | 缓存 " + a.Cached.ToString("N0") + " | 输出 " + a.Output.ToString("N0") + " | 总计 " + a.Total.ToString("N0") + " | 轮次 " + a.Turns.ToString());
             }
             foreach (string e in d.Errors) sb.AppendLine("[warn] " + e);
             return sb.ToString();
         }
     }
-
-    // ---------- 几何/绘制辅助 ----------
     static class Ui
     {
         public static GraphicsPath Round(RectangleF r, float rad)
@@ -769,10 +1041,11 @@ namespace CodexUsageViewer
         public static string AutoShotPath;
 
         UsageData _data;
+        UsageData _fullData;
         string _dataDir;
 
-        StatCard _cardTotal, _cardInput, _cardOutput, _cardCached, _cardReason, _cardThreads, _cardRange;
-        ComboBox _cboView, _cboMetric;
+        StatCard _cardTotal, _cardTasks, _cardPerTask, _cardInput, _cardOutput, _cardCached, _cardReason, _cardThreads;
+        ComboBox _cboView, _cboMetric, _cboAgent;
         ChartView _chart;
         DataGridView _grid;
         ModernButton _btnRefresh, _btnOpen;
@@ -793,7 +1066,7 @@ namespace CodexUsageViewer
 
         void BuildUi()
         {
-            Text = "Codex Token 用量";
+            Text = "AI Agent Token 用量";
             Font = Ui.F(9.5f, false);
             BackColor = BG;
             FormBorderStyle = FormBorderStyle.None;
@@ -827,7 +1100,7 @@ namespace CodexUsageViewer
             titleBar.Controls.Add(logo);
 
             Label appTitle = new Label();
-            appTitle.Text = "Codex Token 用量";
+            appTitle.Text = "AI Agent Token 用量";
             appTitle.Font = Ui.F(11f, true);
             appTitle.ForeColor = INK;
             appTitle.AutoSize = true;
@@ -835,7 +1108,7 @@ namespace CodexUsageViewer
             titleBar.Controls.Add(appTitle);
 
             Label ver = new Label();
-            ver.Text = "v1.2";
+            ver.Text = "v1.3";
             ver.Font = Ui.F(8.5f, false);
             ver.ForeColor = Color.FromArgb(255, 79, 124, 255);
             ver.AutoSize = true;
@@ -882,7 +1155,7 @@ namespace CodexUsageViewer
             header.Controls.Add(hTitle);
 
             Label hSub = new Label();
-            hSub.Text = "Codex 本地会话 token 消耗统计";
+            hSub.Text = "本地 AI Agent 会话 token 消耗统计";
             hSub.Font = Ui.F(9f, false);
             hSub.ForeColor = SUB;
             hSub.AutoSize = true;
@@ -908,18 +1181,19 @@ namespace CodexUsageViewer
             TableLayoutPanel stats = new TableLayoutPanel();
             stats.Dock = DockStyle.Fill;
             stats.BackColor = BG;
-            stats.ColumnCount = 7;
+            stats.ColumnCount = 8;
             stats.RowCount = 1;
             stats.Padding = new Padding(18, 4, 18, 0);
-            for (int i = 0; i < 7; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 7f));
+            for (int i = 0; i < 8; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 8f));
             root.Controls.Add(stats, 0, 2);
             stats.Controls.Add(MakeCard("累计 Tokens", Color.FromArgb(255, 79, 124, 255), out _cardTotal), 0, 0);
-            stats.Controls.Add(MakeCard("输入", Color.FromArgb(255, 56, 189, 248), out _cardInput), 1, 0);
-            stats.Controls.Add(MakeCard("输出", Color.FromArgb(255, 52, 211, 153), out _cardOutput), 2, 0);
-            stats.Controls.Add(MakeCard("缓存读取", Color.FromArgb(255, 251, 191, 36), out _cardCached), 3, 0);
-            stats.Controls.Add(MakeCard("推理 tokens", Color.FromArgb(255, 167, 139, 250), out _cardReason), 4, 0);
-            stats.Controls.Add(MakeCard("会话数", Color.FromArgb(255, 244, 114, 182), out _cardThreads), 5, 0);
-            stats.Controls.Add(MakeCard("数据范围", Color.FromArgb(255, 148, 163, 184), out _cardRange), 6, 0);
+            stats.Controls.Add(MakeCard("完成任务", Color.FromArgb(255, 52, 211, 153), out _cardTasks), 1, 0);
+            stats.Controls.Add(MakeCard("每任务均耗", Color.FromArgb(255, 244, 114, 182), out _cardPerTask), 2, 0);
+            stats.Controls.Add(MakeCard("输入", Color.FromArgb(255, 56, 189, 248), out _cardInput), 3, 0);
+            stats.Controls.Add(MakeCard("输出", Color.FromArgb(255, 45, 212, 191), out _cardOutput), 4, 0);
+            stats.Controls.Add(MakeCard("缓存读取", Color.FromArgb(255, 251, 191, 36), out _cardCached), 5, 0);
+            stats.Controls.Add(MakeCard("推理 tokens", Color.FromArgb(255, 167, 139, 250), out _cardReason), 6, 0);
+            stats.Controls.Add(MakeCard("会话数", Color.FromArgb(255, 148, 163, 184), out _cardThreads), 7, 0);
 
             // ---- 第 3 行：筛选工具行 ----
             Panel tools = new Panel();
@@ -933,13 +1207,16 @@ namespace CodexUsageViewer
             Label lm = new Label(); lm.Text = "指标"; lm.Font = Ui.F(9f, true); lm.ForeColor = SUB; lm.AutoSize = true; lm.Location = new Point(200, 16);
             _cboMetric = MakeCombo(new object[] { "总 Tokens", "输入", "输出", "缓存读取", "推理 tokens" });
             _cboMetric.Location = new Point(244, 10); _cboMetric.Width = 136;
+            Label la = new Label(); la.Text = "Agent"; la.Font = Ui.F(9f, true); la.ForeColor = SUB; la.AutoSize = true; la.Location = new Point(404, 16);
+            _cboAgent = MakeCombo(new object[] { "全部", "Codex", "Claude" });
+            _cboAgent.Location = new Point(452, 10); _cboAgent.Width = 108;
             Label hint = new Label();
             hint.Text = "悬停柱状图查看精确数值";
             hint.Font = Ui.F(8.5f, false);
             hint.ForeColor = SUB;
             hint.AutoSize = true;
             hint.Location = new Point(0, 17);
-            tools.Controls.Add(lv); tools.Controls.Add(_cboView); tools.Controls.Add(lm); tools.Controls.Add(_cboMetric); tools.Controls.Add(hint);
+            tools.Controls.Add(lv); tools.Controls.Add(_cboView); tools.Controls.Add(lm); tools.Controls.Add(_cboMetric); tools.Controls.Add(la); tools.Controls.Add(_cboAgent); tools.Controls.Add(hint);
             tools.Resize += delegate { hint.Left = tools.Width - 24 - hint.Width; };
 
             // ---- 第 4 行：底部状态 ----
@@ -977,6 +1254,7 @@ namespace CodexUsageViewer
 
             _cboView.SelectedIndexChanged += delegate { RefreshChart(); };
             _cboMetric.SelectedIndexChanged += delegate { RefreshChart(); };
+            _cboAgent.SelectedIndexChanged += delegate { ApplyAgentFilter(); };
             _btnRefresh.Click += delegate { LoadData(); };
             _btnOpen.Click += delegate
             {
@@ -1134,16 +1412,13 @@ namespace CodexUsageViewer
             {
                 Cursor = Cursors.WaitCursor;
                 DateTime sw = DateTime.UtcNow;
-                UsageData d = UsageLoader.LoadAll(_dataDir);
-                _data = d;
+                _fullData = UsageLoader.LoadAll(_dataDir);
+                ApplyAgentFilter();
                 double ms = (DateTime.UtcNow - sw).TotalMilliseconds;
-                UpdateStats();
-                FillGrid();
-                RefreshChart();
-                _lblStatus.Text = "已加载 " + d.FileCount.ToString() + " 个文件 / " + d.Records.Count.ToString() + " 条记录" +
-                    (d.Errors.Count > 0 ? "（" + d.Errors.Count.ToString() + " 个警告）" : "") + " · 耗时 " + ms.ToString("0") + " ms · " + _dataDir;
-                if (d.Errors.Count > 0 && d.Records.Count == 0)
-                    MessageBox.Show(this, "未读取到有效记录。\n" + String.Join("\n", d.Errors), "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (_fullData != null)
+                    _lblStatus.Text = _lblStatus.Text + " · 扫描耗时 " + ms.ToString("0") + " ms";
+                if (_fullData != null && _fullData.Errors.Count > 0 && _fullData.Records.Count == 0)
+                    MessageBox.Show(this, "未读取到有效记录。\n" + String.Join("\n", _fullData.Errors), "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             catch (Exception ex)
             {
@@ -1152,6 +1427,31 @@ namespace CodexUsageViewer
             finally { Cursor = Cursors.Default; }
         }
 
+        void ApplyAgentFilter()
+        {
+            if (_fullData == null) return;
+            string agent = (_cboAgent.SelectedItem != null) ? _cboAgent.SelectedItem.ToString() : "全部";
+            _data = UsageLoader.FilterByAgent(_fullData, agent);
+            UpdateStats();
+            FillGrid();
+            RefreshChart();
+            UpdateStatus();
+        }
+
+        void UpdateStatus()
+        {
+            if (_data == null) return;
+            long total = 0;
+            foreach (UsageRecord r in _data.Records) total += r.Total;
+            string range = _data.Records.Count > 0
+                ? _data.MinTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " ~ " + _data.MaxTime.ToLocalTime().ToString("MM-dd HH:mm")
+                : "";
+            string agents = String.Join("/", _data.Records.Select(r => r.Agent).Distinct());
+            _lblStatus.Text = "Agent: " + (agents.Length == 0 ? "-" : agents) + " · 任务 " + _data.Tasks.Count.ToString()
+                + " · 记录 " + _data.Records.Count.ToString() + " · 文件 " + _data.FileCount.ToString()
+                + (_data.Records.Count > 0 ? " · " + range : "")
+                + (_data.Errors.Count > 0 ? "（" + _data.Errors.Count.ToString() + " 警告）" : "");
+        }
         void UpdateStats()
         {
             if (_data == null) return;
@@ -1160,19 +1460,18 @@ namespace CodexUsageViewer
             foreach (UsageRecord r in _data.Records)
             {
                 total += r.Total; inp += r.Input; outp += r.Output; cached += r.Cached; reas += r.Reasoning;
-                threads.Add(r.ThreadId);
+                threads.Add(r.Agent + "|" + r.ThreadId);
             }
             _cardTotal.SetValue(Short(total));
+            _cardTasks.SetValue(_data.Tasks.Count.ToString("N0"));
+            long avg = (_data.Tasks.Count > 0) ? total / _data.Tasks.Count : 0;
+            _cardPerTask.SetValue(_data.Tasks.Count > 0 ? Short(avg) : "-");
             _cardInput.SetValue(Short(inp));
             _cardOutput.SetValue(Short(outp));
             _cardCached.SetValue(Short(cached));
             _cardReason.SetValue(Short(reas));
             _cardThreads.SetValue(threads.Count.ToString());
-            _cardRange.SetValue(_data.Records.Count > 0
-                ? _data.MinTime.ToLocalTime().ToString("yyyy-MM-dd") + " ~ " + _data.MaxTime.ToLocalTime().ToString("MM-dd")
-                : "-");
         }
-
         static string Short(long v)
         {
             if (v >= 1000000000L) return (v / 1000000000.0).ToString("0.00") + "B";
@@ -1205,7 +1504,8 @@ namespace CodexUsageViewer
             {
                 foreach (ThreadAgg a in UsageLoader.AggregateByThread(_data))
                 {
-                    items.Add(new ChartItem(a.Name ?? UsageLoader.ShortId(a.ThreadId), PickThread(a, metric)));
+                    string lab = (a.Agent ?? "") + "·" + (a.Name ?? UsageLoader.ShortId(a.ThreadId));
+                    items.Add(new ChartItem(lab, PickThread(a, metric)));
                 }
                 title = "按会话 · " + _cboMetric.Text;
             }
@@ -1225,13 +1525,14 @@ namespace CodexUsageViewer
         {
             _grid.SuspendLayout();
             _grid.Columns.Clear();
-            AddCol("time", "时间", 150, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("thread", "会话", 260, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("inp", "输入", 90, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("cached", "缓存读取", 90, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("out", "输出", 90, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("reason", "推理", 90, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("total", "总量", 100, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("agent", "Agent", 55, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("time", "时间", 135, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("thread", "会话", 215, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("inp", "输入", 75, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("cached", "缓存读取", 80, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("out", "输出", 75, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("reason", "推理", 75, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("total", "总量", 85, DataGridViewContentAlignment.MiddleRight, true);
 
             List<UsageRecord> sorted = new List<UsageRecord>();
             if (_data != null)
@@ -1243,13 +1544,14 @@ namespace CodexUsageViewer
                 foreach (UsageRecord r in sorted)
                 {
                     int i = _grid.Rows.Add();
-                    _grid.Rows[i].Cells[0].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-                    _grid.Rows[i].Cells[1].Value = UsageLoader.ThreadLabel(_data, r.ThreadId);
-                    _grid.Rows[i].Cells[2].Value = r.Input.ToString("N0");
-                    _grid.Rows[i].Cells[3].Value = r.Cached.ToString("N0");
-                    _grid.Rows[i].Cells[4].Value = r.Output.ToString("N0");
-                    _grid.Rows[i].Cells[5].Value = r.Reasoning.ToString("N0");
-                    _grid.Rows[i].Cells[6].Value = r.Total.ToString("N0");
+                    _grid.Rows[i].Cells[0].Value = r.Agent;
+                    _grid.Rows[i].Cells[1].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                    _grid.Rows[i].Cells[2].Value = UsageLoader.ThreadLabel(_data, r.Agent, r.ThreadId);
+                    _grid.Rows[i].Cells[3].Value = r.Input.ToString("N0");
+                    _grid.Rows[i].Cells[4].Value = r.Cached.ToString("N0");
+                    _grid.Rows[i].Cells[5].Value = r.Output.ToString("N0");
+                    _grid.Rows[i].Cells[6].Value = r.Reasoning.ToString("N0");
+                    _grid.Rows[i].Cells[7].Value = r.Total.ToString("N0");
                 }
             }
             _grid.ResumeLayout();
@@ -1262,15 +1564,8 @@ namespace CodexUsageViewer
             c.HeaderText = header;
             c.FillWeight = fill;
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
-            if (numeric)
-            {
-                c.DefaultCellStyle.Alignment = align;
-                c.DefaultCellStyle.Format = "N0";
-            }
-            else
-            {
-                c.DefaultCellStyle.Alignment = align;
-            }
+            c.DefaultCellStyle.Alignment = align;
+            if (numeric) c.DefaultCellStyle.Format = "N0";
             _grid.Columns.Add(c);
         }
     }

@@ -1,19 +1,26 @@
-# Codex Token 用量可视化
+# AI Agent Token 用量可视化
 
-一个零依赖的原生 Windows 桌面小工具（.NET Framework + WinForms，C#），用于读取本地 Codex 的会话记录并可视化 token 用量。
+一个零依赖的原生 Windows 桌面小工具（.NET Framework + WinForms，C#），用于读取本地 **Codex / Claude 等 AI Agent** 的会话记录并可视化 token 用量与任务效率。
 
 ## 功能
 
-- **现代无边框界面**：圆角窗体、自定义标题栏（可拖动/双击最大化/边缘缩放）、品牌 Logo 徽标
-- **统计卡片**：累计 Tokens、输入、输出、缓存读取、推理 tokens、会话数、数据范围（圆角卡片 + 主题色点缀）
-- **动态柱状图**：渐变圆角柱 + 入场生长动画，支持「按天 / 按会话」×「总量 / 输入 / 输出 / 缓存读取 / 推理」，鼠标悬停显示精确数值气泡
-- **明细表格**：自定义表头、斑马纹行，逐条用量记录按时间倒序（最多 5000 条）
-- **手动刷新数据**、一键打开数据目录
+- **多 Agent 支持**：自动扫描 Codex 与 Claude 的本地会话记录，可筛选「全部 / Codex / Claude」
+- **效率指标**：统计「完成任务数」与「每任务平均 token 消耗」，直观衡量完成任务的开销
+- **现代无边框界面**：圆角窗体、自定义标题栏（拖动 / 双击最大化 / 边缘缩放）
+- **统计卡片**：累计 Tokens、完成任务、每任务均耗、输入、输出、缓存读取、推理 tokens、会话数
+- **动态柱状图**：渐变圆角柱 + 入场动画，按天 / 按会话视图 × 五种指标，悬停显示精确数值
+- **明细表格**：Agent / 时间 / 会话 / 各类 token，按时间倒序（最多 5000 条）
+- 手动刷新、一键打开数据目录
 
-## 数据来源
+## 数据来源（纯本地，不联网）
 
-程序扫描 `%USERPROFILE%\.codex\sessions` 下所有 `rollout-*.jsonl`（Codex 每次请求的 token 记录），
-并读取同目录 `session_index.jsonl` 将会话 ID 映射为会话名。纯本地读取，不联网、不写任何配置。
+| Agent | 扫描目录 |
+|---|---|
+| Codex | `%USERPROFILE%\.codex\sessions`（rollout-*.jsonl + session_index.jsonl） |
+| Claude | `%LOCALAPPDATA%\Claude-3p\local-agent-mode-sessions`、`%LOCALAPPDATA%\Claude`、`%USERPROFILE%\.claude\projects` |
+
+- **任务**：Codex 以 `task_complete` 事件计数；Claude 以用户请求 / 会话完成事件计数
+- **每任务均耗** = 累计 tokens ÷ 完成任务数（衡量完成一个任务的平均开销，越低越高效）
 
 ## 构建
 
@@ -24,19 +31,9 @@
 .\build.ps1
 ```
 
-也可以直接用 csc 编译：
-
-```powershell
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /platform:anycpu /optimize+ `
-  /win32icon:app.ico /out:bin\CodexTokenUsageViewer.exe `
-  /r:System.dll /r:System.Core.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Xml.dll `
-  /r:C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll CodexTokenUsageViewer.cs
-```
-
 ## 使用
 
-双击生成的 `CodexTokenUsageViewer.exe` 即可。窗口为无边框现代风格：按住顶部空白拖动窗口，
-双击标题切换最大化，右下边缘可拖拽缩放，右上角为最小化 / 最大化 / 关闭按钮。
+双击生成的 exe 即可。顶部「Agent」下拉可切换统计范围；「完成任务 / 每任务均耗」卡片即任务效率指标。
 
 命令行自检参数（开发用）：
 
@@ -48,13 +45,15 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /
 ```
 codex-usage-viewer/
 ├── CodexTokenUsageViewer.cs   # 全部源码（单文件）
-├── app.ico                    # 程序图标（32x32）
+├── app.ico                    # 程序图标
 ├── build.ps1                  # 一键构建脚本
+├── push-to-github.ps1         # 一键推送 GitHub 脚本
 ├── README.md
 └── .gitignore
 ```
 
 ## 版本记录
 
-- **v1.2**（2026-09-06）：UI 全面升级——无边框圆角窗体、自定义标题栏、统计卡片、动态渐变柱状图与精致表格样式。
-- **v1.1**（2026-09-06）：第一版。WinForms 原生界面，支持按天 / 按会话统计、柱状图可视化与明细表格。
+- **v1.3**（2026-09-06）：多 Agent 统计（Codex + Claude）与任务效率指标（完成任务数 / 每任务均耗）。
+- **v1.2**（2026-09-06）：UI 全面升级——无边框圆角窗体、统计卡片、动态渐变柱状图与精致表格。
+- **v1.1**（2026-09-06）：第一版。按天 / 按会话统计、柱状图可视化与明细表格。
