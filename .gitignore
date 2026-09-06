@@ -1,0 +1,7 @@
+# 构建产物
+bin/
+*.exe
+
+# 本地测试/临时输出
+report.txt
+shot*.png
