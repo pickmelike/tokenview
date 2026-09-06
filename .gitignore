@@ -5,3 +5,6 @@ bin/
 # 本地测试/临时输出
 report.txt
 shot*.png
+
+# Claude 本地设置（可能含敏感配置）
+.claude/
