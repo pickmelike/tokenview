@@ -293,7 +293,63 @@ namespace CodexUsageViewer
         }
     }
 
-    // ---------- 自绘柱状图 ----------
+    // ---------- 几何/绘制辅助 ----------
+    static class Ui
+    {
+        public static GraphicsPath Round(RectangleF r, float rad)
+        {
+            GraphicsPath p = new GraphicsPath();
+            if (rad <= 0.5f)
+            {
+                p.AddRectangle(r);
+                return p;
+            }
+            float d = rad * 2f;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public static void FillRound(Graphics g, RectangleF r, float rad, Color c)
+        {
+            using (GraphicsPath p = Round(r, rad))
+            using (SolidBrush b = new SolidBrush(c))
+                g.FillPath(b, p);
+        }
+
+        public static void FillRoundGrad(Graphics g, RectangleF r, float rad, Color c1, Color c2, float angle)
+        {
+            using (GraphicsPath p = Round(r, rad))
+            using (LinearGradientBrush b = new LinearGradientBrush(r, c1, c2, angle))
+                g.FillPath(b, p);
+        }
+
+        public static void DrawRound(Graphics g, RectangleF r, float rad, Color c, float width)
+        {
+            using (GraphicsPath p = Round(r, rad))
+            using (Pen pen = new Pen(c, width))
+                g.DrawPath(pen, p);
+        }
+
+        // 数值缩写: 1234 -> 1.2K, 3.4M ...
+        public static string ShortNum(long v)
+        {
+            if (v >= 1000000000L) return (v / 1000000000.0).ToString("0.##") + "B";
+            if (v >= 1000000L) return (v / 1000000.0).ToString("0.##") + "M";
+            if (v >= 1000L) return (v / 1000.0).ToString("0.##") + "K";
+            return v.ToString();
+        }
+
+        public static Font F(float size, bool bold)
+        {
+            return new Font("Microsoft YaHei UI", size, bold ? FontStyle.Bold : FontStyle.Regular);
+        }
+    }
+
+    // ---------- 图表数据项 ----------
     class ChartItem
     {
         public string Label;
@@ -301,25 +357,41 @@ namespace CodexUsageViewer
         public ChartItem(string label, long value) { Label = label; Value = value; }
     }
 
+    // ---------- 自绘柱状图 v1.2 ----------
     class ChartView : Control
     {
         List<ChartItem> _items = new List<ChartItem>();
         string _title = "";
         int _hover = -1;
+        double _anim = 1.0;
+        Timer _timer;
+        static readonly Color C_TOP = Color.FromArgb(255, 110, 168, 255);
+        static readonly Color C_BOT = Color.FromArgb(255, 79, 124, 255);
+        static readonly Color C_HOV_TOP = Color.FromArgb(255, 255, 199, 110);
+        static readonly Color C_HOV_BOT = Color.FromArgb(255, 255, 154, 44);
 
         public ChartView()
         {
-            this.DoubleBuffered = true;
-            this.ResizeRedraw = true;
-            this.BackColor = Color.White;
-            this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+            BackColor = Color.White;
+            _timer = new Timer();
+            _timer.Interval = 16;
+            _timer.Tick += delegate
+            {
+                _anim += 0.09;
+                if (_anim >= 1.0) { _anim = 1.0; _timer.Stop(); }
+                Invalidate();
+            };
         }
 
         public void SetItems(IEnumerable<ChartItem> items, string title)
         {
-            _items = (items == null) ? new List<ChartItem>() : items.ToList();
+            _items = (items == null) ? new List<ChartItem>() : new List<ChartItem>(items);
             _title = title ?? "";
             _hover = -1;
+            _anim = 0.0;
+            _timer.Start();
             Invalidate();
         }
 
@@ -329,6 +401,7 @@ namespace CodexUsageViewer
             int idx = HitTest(e.X, e.Y);
             if (idx != _hover) { _hover = idx; Invalidate(); }
         }
+
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
@@ -338,27 +411,18 @@ namespace CodexUsageViewer
         int HitTest(int x, int y)
         {
             if (_items.Count == 0) return -1;
-            Rectangle plot = PlotRect();
-            if (!plot.Contains(x, y)) return -1;
-            double n = _items.Count;
-            double slot = plot.Width / n;
+            RectangleF plot = PlotRect();
+            if (x < plot.X || x > plot.Right || y < plot.Y || y > plot.Bottom) return -1;
+            float slot = plot.Width / _items.Count;
             int i = (int)((x - plot.X) / slot);
             if (i < 0 || i >= _items.Count) return -1;
             return i;
         }
 
-        Rectangle PlotRect()
+        RectangleF PlotRect()
         {
-            int left = 78, top = 46, right = 18, bottom = 58;
-            return new Rectangle(left, top, Math.Max(10, this.ClientSize.Width - left - right), Math.Max(10, this.ClientSize.Height - top - bottom));
-        }
-
-        static string ShortNum(long v)
-        {
-            if (v >= 1000000000L) return (v / 1000000000.0).ToString("0.##") + "B";
-            if (v >= 1000000L) return (v / 1000000.0).ToString("0.##") + "M";
-            if (v >= 1000L) return (v / 1000.0).ToString("0.##") + "K";
-            return v.ToString();
+            float left = 84, top = 46, right = 16, bottom = 58;
+            return new RectangleF(left, top, Math.Max(10, Width - left - right), Math.Max(10, Height - top - bottom));
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -366,28 +430,31 @@ namespace CodexUsageViewer
             base.OnPaint(e);
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(this.BackColor);
-            int W = this.ClientSize.Width, H = this.ClientSize.Height;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.Clear(BackColor);
+            float W = Width, H = Height;
 
             // 标题
-            using (Font titleFont = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold))
-            {
-                SizeF sz = g.MeasureString(_title, titleFont);
-                using (SolidBrush titleBrush = new SolidBrush(Color.FromArgb(40, 50, 70)))
-                    g.DrawString(_title, titleFont, titleBrush, (W - sz.Width) / 2f, 12f);
-            }
+            using (Font tf = Ui.F(11.5f, true))
+            using (SolidBrush tb = new SolidBrush(Color.FromArgb(255, 31, 41, 55)))
+                g.DrawString(_title, tf, tb, 20, 12);
 
             if (_items.Count == 0)
             {
-                using (Font f = new Font("Microsoft YaHei UI", 10f))
-                    g.DrawString("暂无数据。请确认 ~/.codex/sessions 下存在 rollout-*.jsonl 记录。", f, Brushes.Gray, 20, H / 2f - 10);
+                using (Font f = Ui.F(10f, false))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 156, 163, 175)))
+                {
+                    string msg = "暂无数据，点击右上角「刷新数据」";
+                    SizeF sz = g.MeasureString(msg, f);
+                    g.DrawString(msg, f, b, (W - sz.Width) / 2f, H / 2f - 8);
+                }
                 return;
             }
 
-            Rectangle plot = PlotRect();
+            RectangleF plot = PlotRect();
             long maxV = Math.Max(1, _items.Max(i => i.Value));
 
-            // Y 轴刻度
+            // Y 轴刻度（nice numbers）
             double rawStep = maxV / 5.0;
             double mag = Math.Pow(10, Math.Floor(Math.Log10(rawStep)));
             double norm = rawStep / mag;
@@ -396,207 +463,522 @@ namespace CodexUsageViewer
             long topV = (long)(Math.Ceiling(maxV / step) * step);
             if (topV <= 0) topV = 1;
 
-            using (Font tickFont = new Font("Microsoft YaHei UI", 8.5f))
-            using (Pen gridPen = new Pen(Color.FromArgb(225, 230, 238)))
-            using (Pen axisPen = new Pen(Color.FromArgb(170, 180, 195)))
+            using (Font tickFont = Ui.F(8.5f, false))
+            using (Pen gridPen = new Pen(Color.FromArgb(60, 226, 232, 240)))
+            using (Pen axisPen = new Pen(Color.FromArgb(120, 203, 213, 225)))
+            using (SolidBrush tickBrush = new SolidBrush(Color.FromArgb(255, 148, 163, 184)))
             {
                 for (long v = 0; v <= topV; v += (long)step)
                 {
                     float y = plot.Bottom - (float)((double)v / topV) * plot.Height;
-                    g.DrawLine(gridPen, plot.X, y, plot.Right, y);
-                    string s = ShortNum(v);
+                    if (v == 0)
+                        g.DrawLine(axisPen, plot.X, y, plot.Right, y);
+                    else
+                    {
+                        g.DrawLine(gridPen, plot.X, y, plot.Right, y);
+                    }
+                    string s = Ui.ShortNum(v);
                     SizeF sz = g.MeasureString(s, tickFont);
-                    using (SolidBrush tickBrush = new SolidBrush(Color.FromArgb(110, 120, 140)))
-                        g.DrawString(s, tickFont, tickBrush, plot.X - sz.Width - 6, y - sz.Height / 2f);
+                    g.DrawString(s, tickFont, tickBrush, plot.X - sz.Width - 7, y - sz.Height / 2f);
                 }
-                g.DrawLine(axisPen, plot.X, plot.Bottom, plot.Right, plot.Bottom);
-                g.DrawLine(axisPen, plot.X, plot.Top, plot.X, plot.Bottom);
             }
 
-            // 柱子
-            double n = _items.Count;
-            double slot = plot.Width / n;
-            double barW = Math.Min(slot * 0.62, 64);
-            int labelEvery = (int)Math.Ceiling(n / 14.0);
+            // 柱子（含生长动画）
+            float slot = plot.Width / _items.Count;
+            float barW = Math.Min(slot * 0.62f, 62f);
+            int labelEvery = (int)Math.Ceiling(_items.Count / 14.0);
             if (labelEvery < 1) labelEvery = 1;
 
-            using (Font labelFont = new Font("Microsoft YaHei UI", 8.5f))
-            using (Font tipFont = new Font("Microsoft YaHei UI", 9f))
+            using (Font labelFont = Ui.F(8.5f, false))
+            using (Font tipFont = Ui.F(9f, false))
+            using (SolidBrush labBrush = new SolidBrush(Color.FromArgb(255, 120, 134, 156)))
             {
                 for (int i = 0; i < _items.Count; i++)
                 {
-                    double cx = plot.X + slot * i + slot / 2;
-                    double h = ((double)_items[i].Value / topV) * plot.Height;
-                    if (h < 1 && _items[i].Value > 0) h = 1;
-                    RectangleF bar = new RectangleF((float)(cx - barW / 2), (float)(plot.Bottom - h), (float)barW, (float)h);
-
+                    float cx = plot.X + slot * i + slot / 2f;
+                    double rawH = ((double)_items[i].Value / topV) * plot.Height * _anim;
+                    if (rawH < 1.0 && _items[i].Value > 0 && _anim > 0.05) rawH = 1.0;
+                    float h = (float)rawH;
+                    float yTop = plot.Bottom - h;
+                    float r = Math.Min(6f, Math.Min(barW / 2f, h));
+                    RectangleF bar = new RectangleF(cx - barW / 2f, yTop, barW, Math.Max(h, 0.5f));
                     bool hot = (i == _hover);
+
                     if (hot)
-                    {
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 180, 60)))
-                            g.FillRectangle(b, bar);
-                    }
+                        Ui.FillRoundGrad(g, bar, r, C_HOV_TOP, C_HOV_BOT, 90f);
                     else
-                    {
-                        using (LinearGradientBrush b = new LinearGradientBrush(bar, Color.FromArgb(47, 128, 237), Color.FromArgb(86, 204, 242), LinearGradientMode.Vertical))
-                            g.FillRectangle(b, bar);
-                        using (Pen p = new Pen(Color.FromArgb(40, 47, 128, 237))) g.DrawRectangle(p, bar.X, bar.Y, bar.Width, bar.Height);
-                    }
+                        Ui.FillRoundGrad(g, bar, r, C_TOP, C_BOT, 90f);
+                    if (_anim >= 1.0)
+                        Ui.DrawRound(g, bar, r, Color.FromArgb(hot ? 180 : 60, 255, 255, 255), 1f);
 
                     // X 轴标签
                     if (i % labelEvery == 0)
                     {
                         string lab = _items[i].Label;
-                        if (lab.Length > 10) lab = lab.Substring(0, 10) + "…";
+                        if (lab.Length > 11) lab = lab.Substring(0, 11) + "…";
                         SizeF sz = g.MeasureString(lab, labelFont);
-                        float lx = (float)(cx - sz.Width / 2);
+                        float lx = cx - sz.Width / 2f;
                         lx = Math.Max(plot.X, Math.Min(plot.Right - sz.Width, lx));
-                        using (SolidBrush labBrush = new SolidBrush(Color.FromArgb(100, 110, 130)))
-                            g.DrawString(lab, labelFont, labBrush, lx, plot.Bottom + 8);
+                        g.DrawString(lab, labelFont, labBrush, lx, plot.Bottom + 10);
                     }
 
-                    // 悬停 tooltip
+                    // 悬停气泡
                     if (hot && _items[i].Value > 0)
                     {
-                        string txt = _items[i].Label + "\n" + _items[i].Value.ToString("N0") + " tokens";
-                        SizeF sz = g.MeasureString(txt, tipFont);
-                        float tw = sz.Width + 16, th = sz.Height + 10;
-                        float tx = (float)(cx - tw / 2);
-                        tx = Math.Max(plot.X, Math.Min(W - tw - 6, tx));
-                        float ty = (float)(plot.Bottom - h - th - 6);
-                        if (ty < plot.Top) ty = plot.Top + 2;
-                        using (SolidBrush bg = new SolidBrush(Color.FromArgb(235, 46, 56, 78)))
-                            g.FillRectangle(bg, tx, ty, tw, th);
-                        g.DrawString(txt, tipFont, Brushes.White, tx + 8, ty + 5);
+                        string t1 = _items[i].Label;
+                        string t2 = _items[i].Value.ToString("N0") + " tokens";
+                        SizeF s1 = g.MeasureString(t1, tipFont);
+                        SizeF s2 = g.MeasureString(t2, tipFont);
+                        float tw = Math.Max(s1.Width, s2.Width) + 20;
+                        float th = s1.Height + s2.Height + 14;
+                        float tx = cx - tw / 2f;
+                        tx = Math.Max(plot.X, Math.Min(W - tw - 8, tx));
+                        float ty = yTop - th - 8;
+                        if (ty < 34) ty = 34;
+                        RectangleF tip = new RectangleF(tx, ty, tw, th);
+                        using (GraphicsPath p = Ui.Round(tip, 8f))
+                        using (SolidBrush bg = new SolidBrush(Color.FromArgb(242, 30, 41, 59)))
+                        using (SolidBrush wb = new SolidBrush(Color.White))
+                        {
+                            g.FillPath(bg, p);
+                            g.DrawString(t1, tipFont, wb, tx + 10, ty + 7);
+                            using (SolidBrush sub = new SolidBrush(Color.FromArgb(255, 255, 214, 150)))
+                                g.DrawString(t2, tipFont, sub, tx + 10, ty + 7 + s1.Height);
+                        }
                     }
                 }
             }
         }
     }
+    // ---------- 圆角按钮 v1.2 ----------
+    enum BtnKind { Primary, Secondary }
 
-    // ---------- 主窗口 ----------
+    class ModernButton : Control
+    {
+        BtnKind _kind;
+        bool _hover;
+        bool _down;
+        public Color Accent = Color.FromArgb(255, 79, 124, 255);
+        public Color AccentHover = Color.FromArgb(255, 66, 105, 240);
+        public int Radius = 8;
+
+        public ModernButton(string text, BtnKind kind)
+        {
+            Text = text;
+            _kind = kind;
+            DoubleBuffered = true;
+            Cursor = Cursors.Hand;
+            Height = 32;
+            BackColor = Color.White;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; _down = false; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) { _down = true; Invalidate(); } }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _down = false; Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            RectangleF rc = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+
+            Color fg, bg1, bg2;
+            if (_kind == BtnKind.Primary)
+            {
+                Color baseC = _hover ? AccentHover : Accent;
+                Color light = Lighten(baseC, 18);
+                bg1 = light; bg2 = baseC;
+                fg = Color.White;
+            }
+            else
+            {
+                bg1 = _hover ? Color.FromArgb(255, 240, 244, 252) : Color.White;
+                bg2 = bg1;
+                fg = Color.FromArgb(255, 51, 65, 85);
+                Ui.DrawRound(g, rc, Radius, Color.FromArgb(255, 214, 222, 235), 1f);
+            }
+
+            using (GraphicsPath p = Ui.Round(rc, Radius))
+            using (LinearGradientBrush br = new LinearGradientBrush(rc, bg1, bg2, 90f))
+            {
+                g.FillPath(br, p);
+                if (_down && _kind == BtnKind.Primary)
+                {
+                    using (SolidBrush dim = new SolidBrush(Color.FromArgb(36, 0, 0, 0)))
+                        g.FillPath(dim, p);
+                }
+            }
+
+            using (Font f = Ui.F(9.5f, true))
+            using (SolidBrush fb = new SolidBrush(fg))
+            {
+                SizeF sz = g.MeasureString(Text, f);
+                g.DrawString(Text, f, fb, (Width - sz.Width) / 2f, (Height - sz.Height) / 2f - 0.5f);
+            }
+        }
+
+        static Color Lighten(Color c, int amt)
+        {
+            int r = Math.Min(255, c.R + amt);
+            int g2 = Math.Min(255, c.G + amt);
+            int b = Math.Min(255, c.B + amt);
+            return Color.FromArgb(c.A, r, g2, b);
+        }
+    }
+
+    // ---------- 标题栏窗口按钮 ----------
+    enum CapType { Min, Max, Close }
+
+    class CaptionButton : Control
+    {
+        CapType _type;
+        bool _hover;
+
+        public CaptionButton(CapType type)
+        {
+            _type = type;
+            DoubleBuffered = true;
+            Cursor = Cursors.Hand;
+            Size = new Size(46, 32);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (_hover)
+            {
+                Color bg = (_type == CapType.Close) ? Color.FromArgb(255, 232, 17, 35) : Color.FromArgb(255, 237, 241, 248);
+                using (SolidBrush b = new SolidBrush(bg))
+                    g.FillRectangle(b, 0, 0, Width, Height);
+            }
+            Color c = (_hover && _type == CapType.Close) ? Color.White : Color.FromArgb(255, 90, 100, 118);
+            using (Pen pen = new Pen(c, 1.4f))
+            {
+                float cx = Width / 2f, cy = Height / 2f;
+                if (_type == CapType.Min)
+                {
+                    g.DrawLine(pen, cx - 7, cy, cx + 7, cy);
+                }
+                else if (_type == CapType.Max)
+                {
+                    g.DrawRectangle(pen, cx - 7, cy - 6, 14, 11);
+                    g.DrawLine(pen, cx - 4, cy - 6, cx + 4, cy - 6);
+                }
+                else
+                {
+                    g.DrawLine(pen, cx - 6, cy - 6, cx + 6, cy + 6);
+                    g.DrawLine(pen, cx + 6, cy - 6, cx - 6, cy + 6);
+                }
+            }
+        }
+    }
+
+    // ---------- 统计卡片 v1.2 ----------
+    class StatCard : Control
+    {
+        string _title;
+        Color _accent;
+        string _value = "-";
+
+        public StatCard(string title, Color accent)
+        {
+            _title = title;
+            _accent = accent;
+            DoubleBuffered = true;
+            Height = 84;
+        }
+
+        public void SetValue(string v)
+        {
+            _value = v;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            RectangleF rc = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+
+            // 卡片底
+            Ui.FillRound(g, rc, 12, Color.White);
+            Ui.DrawRound(g, rc, 12, Color.FromArgb(255, 232, 237, 246), 1f);
+
+            // 左上 accent 竖条
+            using (GraphicsPath p = Ui.Round(new RectangleF(15, 17, 4, 30), 2f))
+            using (SolidBrush ab = new SolidBrush(_accent))
+                g.FillPath(ab, p);
+
+            // 标题
+            using (Font tf = Ui.F(8.8f, false))
+            using (SolidBrush tb = new SolidBrush(Color.FromArgb(255, 148, 158, 176)))
+                g.DrawString(_title, tf, tb, 27, 13);
+
+            // 数值（自动缩小字号适配宽度）
+            float fs = 16f;
+            while (fs > 8.5f)
+            {
+                using (Font vf = Ui.F(fs, true))
+                {
+                    SizeF sz = g.MeasureString(_value, vf);
+                    if (sz.Width <= Width - 34)
+                    {
+                        using (SolidBrush vb = new SolidBrush(Color.FromArgb(255, 34, 45, 62)))
+                            g.DrawString(_value, vf, vb, 27, 43);
+                        break;
+                    }
+                }
+                fs -= 0.7f;
+            }
+        }
+    }
+    // ---------- Logo 徽标 ----------
+    class LogoBadge : Control
+    {
+        public LogoBadge()
+        {
+            DoubleBuffered = true;
+            Size = new Size(24, 24);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            RectangleF rc = new RectangleF(0.5f, 0.5f, 23f, 23f);
+            Ui.FillRoundGrad(g, rc, 7, Color.FromArgb(255, 110, 168, 255), Color.FromArgb(255, 79, 124, 255), 135f);
+            using (SolidBrush w = new SolidBrush(Color.White))
+            {
+                g.FillRectangle(w, 5, 13, 4, 6);
+                g.FillRectangle(w, 10.5f, 9, 4, 10);
+                g.FillRectangle(w, 16, 5, 4, 14);
+            }
+        }
+    }
+
+    // ---------- 主窗口 v1.2 ----------
     class MainForm : Form
     {
         public static string AutoShotPath;
+
         UsageData _data;
-        Label _lblTotal, _lblInput, _lblOutput, _lblCached, _lblReasoning, _lblSessions, _lblRange;
-        ToolStripStatusLabel _lblStatus;
+        string _dataDir;
+
+        StatCard _cardTotal, _cardInput, _cardOutput, _cardCached, _cardReason, _cardThreads, _cardRange;
         ComboBox _cboView, _cboMetric;
         ChartView _chart;
         DataGridView _grid;
-        Button _btnRefresh, _btnOpenDir;
-        string _dataDir;
+        ModernButton _btnRefresh, _btnOpen;
+        Label _lblStatus;
+        CaptionButton _btnMax;
+
+        static readonly Color BG = Color.FromArgb(255, 244, 246, 251);
+        static readonly Color CARD_BORDER = Color.FromArgb(255, 231, 236, 245);
+        static readonly Color INK = Color.FromArgb(255, 31, 41, 55);
+        static readonly Color SUB = Color.FromArgb(255, 130, 142, 160);
 
         public MainForm()
         {
             _dataDir = UsageLoader.DefaultSessionsPath();
             BuildUi();
-            this.Shown += delegate
-            {
-                LoadData();
-                if (!String.IsNullOrEmpty(MainForm.AutoShotPath))
-                {
-                    try
-                    {
-                        Application.DoEvents();
-                        System.Threading.Thread.Sleep(500);
-                        Application.DoEvents();
-                        using (Bitmap bmp = new Bitmap(this.Width, this.Height))
-                        {
-                            this.DrawToBitmap(bmp, new Rectangle(0, 0, this.Width, this.Height));
-                            bmp.Save(MainForm.AutoShotPath, System.Drawing.Imaging.ImageFormat.Png);
-                        }
-                    }
-                    catch { }
-                    this.Close();
-                }
-            };
+            Shown += delegate { OnShownOnce(); };
         }
 
         void BuildUi()
         {
-            this.Text = "Codex Token 用量可视化";
-            this.Font = new Font("Microsoft YaHei UI", 9f);
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.ClientSize = new Size(1180, 760);
-            this.MinimumSize = new Size(920, 620);
+            Text = "Codex Token 用量";
+            Font = Ui.F(9.5f, false);
+            BackColor = BG;
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(1240, 840);
+            MinimumSize = new Size(980, 640);
+            DoubleBuffered = true;
 
-            // 顶部统计卡
+            // 根布局：显式分行，避免 Dock 顺序歧义
+            TableLayoutPanel root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.ColumnCount = 1;
+            root.RowCount = 6;
+            root.BackColor = BG;
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46f));   // 标题栏
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62f));   // 顶部操作行
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104f));  // 统计卡片
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52f));   // 筛选工具行
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));   // 底部状态
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));   // 图表 + 表格
+            Controls.Add(root);
+
+            // ---- 第 0 行：标题栏 ----
+            Panel titleBar = new Panel();
+            titleBar.Dock = DockStyle.Fill;
+            titleBar.BackColor = Color.White;
+            root.Controls.Add(titleBar, 0, 0);
+
+            LogoBadge logo = new LogoBadge();
+            logo.Location = new Point(18, 11);
+            titleBar.Controls.Add(logo);
+
+            Label appTitle = new Label();
+            appTitle.Text = "Codex Token 用量";
+            appTitle.Font = Ui.F(11f, true);
+            appTitle.ForeColor = INK;
+            appTitle.AutoSize = true;
+            appTitle.Location = new Point(50, 13);
+            titleBar.Controls.Add(appTitle);
+
+            Label ver = new Label();
+            ver.Text = "v1.2";
+            ver.Font = Ui.F(8.5f, false);
+            ver.ForeColor = Color.FromArgb(255, 79, 124, 255);
+            ver.AutoSize = true;
+            ver.Location = new Point(appTitle.Right + 10, 17);
+            titleBar.Controls.Add(ver);
+
+            CaptionButton btnMin = new CaptionButton(CapType.Min);
+            CaptionButton btnClose = new CaptionButton(CapType.Close);
+            _btnMax = new CaptionButton(CapType.Max);
+            btnMin.Location = new Point(0, 7);
+            _btnMax.Location = new Point(0, 7);
+            btnClose.Location = new Point(0, 7);
+            titleBar.Controls.Add(btnMin);
+            titleBar.Controls.Add(_btnMax);
+            titleBar.Controls.Add(btnClose);
+            btnMin.Click += delegate { WindowState = FormWindowState.Minimized; };
+            _btnMax.Click += delegate { ToggleMax(); };
+            btnClose.Click += delegate { Close(); };
+            titleBar.Resize += delegate
+            {
+                int w = titleBar.Width;
+                btnClose.Left = w - 46;
+                _btnMax.Left = w - 92;
+                btnMin.Left = w - 138;
+            };
+
+            titleBar.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
+            titleBar.MouseDoubleClick += delegate { ToggleMax(); };
+            appTitle.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
+            ver.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
+
+            // ---- 第 1 行：顶部操作行 ----
+            Panel header = new Panel();
+            header.Dock = DockStyle.Fill;
+            header.BackColor = BG;
+            root.Controls.Add(header, 0, 1);
+
+            Label hTitle = new Label();
+            hTitle.Text = "用量总览";
+            hTitle.Font = Ui.F(16f, true);
+            hTitle.ForeColor = INK;
+            hTitle.AutoSize = true;
+            hTitle.Location = new Point(24, 8);
+            header.Controls.Add(hTitle);
+
+            Label hSub = new Label();
+            hSub.Text = "Codex 本地会话 token 消耗统计";
+            hSub.Font = Ui.F(9f, false);
+            hSub.ForeColor = SUB;
+            hSub.AutoSize = true;
+            hSub.Location = new Point(26, 36);
+            header.Controls.Add(hSub);
+
+            _btnOpen = new ModernButton("打开数据目录", BtnKind.Secondary);
+            _btnOpen.Size = new Size(132, 34);
+            _btnRefresh = new ModernButton("刷新数据", BtnKind.Primary);
+            _btnRefresh.Size = new Size(116, 34);
+            _btnRefresh.Location = new Point(0, 14);
+            _btnOpen.Location = new Point(0, 14);
+            header.Controls.Add(_btnRefresh);
+            header.Controls.Add(_btnOpen);
+            header.Resize += delegate
+            {
+                int w = header.Width;
+                _btnOpen.Left = w - 24 - 132;
+                _btnRefresh.Left = w - 24 - 132 - 12 - 116;
+            };
+
+            // ---- 第 2 行：统计卡片 ----
             TableLayoutPanel stats = new TableLayoutPanel();
-            stats.Dock = DockStyle.Top;
-            stats.Height = 86;
+            stats.Dock = DockStyle.Fill;
+            stats.BackColor = BG;
             stats.ColumnCount = 7;
             stats.RowCount = 1;
-            stats.Padding = new Padding(8);
+            stats.Padding = new Padding(18, 4, 18, 0);
             for (int i = 0; i < 7; i++) stats.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 7f));
-            stats.Controls.Add(MakeCard("累计 Tokens", out _lblTotal, Color.FromArgb(47, 128, 237)), 0, 0);
-            stats.Controls.Add(MakeCard("输入", out _lblInput, Color.FromArgb(86, 204, 242)), 1, 0);
-            stats.Controls.Add(MakeCard("输出", out _lblOutput, Color.FromArgb(88, 214, 141)), 2, 0);
-            stats.Controls.Add(MakeCard("缓存读取", out _lblCached, Color.FromArgb(255, 180, 60)), 3, 0);
-            stats.Controls.Add(MakeCard("推理 tokens", out _lblReasoning, Color.FromArgb(190, 130, 255)), 4, 0);
-            stats.Controls.Add(MakeCard("会话数", out _lblSessions, Color.FromArgb(90, 160, 255)), 5, 0);
-            stats.Controls.Add(MakeCard("数据范围", out _lblRange, Color.FromArgb(150, 160, 175)), 6, 0);
-            this.Controls.Add(stats);
+            root.Controls.Add(stats, 0, 2);
+            stats.Controls.Add(MakeCard("累计 Tokens", Color.FromArgb(255, 79, 124, 255), out _cardTotal), 0, 0);
+            stats.Controls.Add(MakeCard("输入", Color.FromArgb(255, 56, 189, 248), out _cardInput), 1, 0);
+            stats.Controls.Add(MakeCard("输出", Color.FromArgb(255, 52, 211, 153), out _cardOutput), 2, 0);
+            stats.Controls.Add(MakeCard("缓存读取", Color.FromArgb(255, 251, 191, 36), out _cardCached), 3, 0);
+            stats.Controls.Add(MakeCard("推理 tokens", Color.FromArgb(255, 167, 139, 250), out _cardReason), 4, 0);
+            stats.Controls.Add(MakeCard("会话数", Color.FromArgb(255, 244, 114, 182), out _cardThreads), 5, 0);
+            stats.Controls.Add(MakeCard("数据范围", Color.FromArgb(255, 148, 163, 184), out _cardRange), 6, 0);
 
-            // 工具栏
-            Panel bar = new Panel();
-            bar.Dock = DockStyle.Top;
-            bar.Height = 46;
-            bar.Padding = new Padding(10, 8, 10, 4);
-            Label l1 = new Label(); l1.Text = "视图:"; l1.AutoSize = true; l1.Location = new Point(12, 15);
-            _cboView = new ComboBox(); _cboView.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cboView.Items.AddRange(new object[] { "按天", "按会话" });
-            _cboView.SelectedIndex = 0;
-            _cboView.Location = new Point(58, 12); _cboView.Width = 90;
-            Label l2 = new Label(); l2.Text = "指标:"; l2.AutoSize = true; l2.Location = new Point(165, 15);
-            _cboMetric = new ComboBox(); _cboMetric.DropDownStyle = ComboBoxStyle.DropDownList;
-            _cboMetric.Items.AddRange(new object[] { "总 Tokens", "输入", "输出", "缓存读取", "推理 tokens" });
-            _cboMetric.SelectedIndex = 0;
-            _cboMetric.Location = new Point(215, 12); _cboMetric.Width = 120;
-            _btnRefresh = new Button(); _btnRefresh.Text = "刷新数据"; _btnRefresh.Location = new Point(355, 10); _btnRefresh.Size = new Size(92, 26);
-            _btnOpenDir = new Button(); _btnOpenDir.Text = "打开数据目录"; _btnOpenDir.Location = new Point(455, 10); _btnOpenDir.Size = new Size(108, 26);
-            bar.Controls.Add(l1); bar.Controls.Add(_cboView); bar.Controls.Add(l2); bar.Controls.Add(_cboMetric);
-            bar.Controls.Add(_btnRefresh); bar.Controls.Add(_btnOpenDir);
-            this.Controls.Add(bar);
+            // ---- 第 3 行：筛选工具行 ----
+            Panel tools = new Panel();
+            tools.Dock = DockStyle.Fill;
+            tools.BackColor = BG;
+            root.Controls.Add(tools, 0, 3);
 
-            // 图表 + 明细
-            SplitContainer split = new SplitContainer();
-            split.Dock = DockStyle.Fill;
-            split.Orientation = Orientation.Horizontal;
+            Label lv = new Label(); lv.Text = "视图"; lv.Font = Ui.F(9f, true); lv.ForeColor = SUB; lv.AutoSize = true; lv.Location = new Point(26, 16);
+            _cboView = MakeCombo(new object[] { "按天", "按会话" });
+            _cboView.Location = new Point(70, 10); _cboView.Width = 104;
+            Label lm = new Label(); lm.Text = "指标"; lm.Font = Ui.F(9f, true); lm.ForeColor = SUB; lm.AutoSize = true; lm.Location = new Point(200, 16);
+            _cboMetric = MakeCombo(new object[] { "总 Tokens", "输入", "输出", "缓存读取", "推理 tokens" });
+            _cboMetric.Location = new Point(244, 10); _cboMetric.Width = 136;
+            Label hint = new Label();
+            hint.Text = "悬停柱状图查看精确数值";
+            hint.Font = Ui.F(8.5f, false);
+            hint.ForeColor = SUB;
+            hint.AutoSize = true;
+            hint.Location = new Point(0, 17);
+            tools.Controls.Add(lv); tools.Controls.Add(_cboView); tools.Controls.Add(lm); tools.Controls.Add(_cboMetric); tools.Controls.Add(hint);
+            tools.Resize += delegate { hint.Left = tools.Width - 24 - hint.Width; };
+
+            // ---- 第 4 行：底部状态 ----
+            Panel footer = new Panel();
+            footer.Dock = DockStyle.Fill;
+            footer.BackColor = BG;
+            root.Controls.Add(footer, 0, 4);
+            _lblStatus = new Label();
+            _lblStatus.Text = "就绪";
+            _lblStatus.Font = Ui.F(8.5f, false);
+            _lblStatus.ForeColor = SUB;
+            _lblStatus.AutoSize = true;
+            _lblStatus.Location = new Point(26, 5);
+            footer.Controls.Add(_lblStatus);
+
+            // ---- 第 5 行：图表 + 表格 ----
+            TableLayoutPanel main = new TableLayoutPanel();
+            main.Dock = DockStyle.Fill;
+            main.BackColor = BG;
+            main.ColumnCount = 1;
+            main.RowCount = 2;
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 54f));
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 46f));
+            root.Controls.Add(main, 0, 5);
 
             _chart = new ChartView();
             _chart.Dock = DockStyle.Fill;
-            split.Panel1.Controls.Add(_chart);
+            _chart.Margin = new Padding(18, 0, 18, 6);
+            main.Controls.Add(_chart, 0, 0);
 
-            _grid = new DataGridView();
+            _grid = MakeGrid();
             _grid.Dock = DockStyle.Fill;
-            _grid.ReadOnly = true;
-            _grid.AllowUserToAddRows = false;
-            _grid.AllowUserToDeleteRows = false;
-            _grid.RowHeadersVisible = false;
-            _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            _grid.BackgroundColor = Color.White;
-            _grid.BorderStyle = BorderStyle.None;
-            _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            split.Panel2.Controls.Add(_grid);
-            this.Controls.Add(split);
-
-            // 状态栏
-            StatusStrip strip = new StatusStrip();
-            _lblStatus = new ToolStripStatusLabel();
-            _lblStatus.Text = "就绪";
-            _lblStatus.Spring = true;
-            _lblStatus.TextAlign = ContentAlignment.MiddleLeft;
-            strip.Items.Add(_lblStatus);
-            this.Controls.Add(strip);
-            split.SplitterDistance = 380;
-            split.Panel1MinSize = 220;
-            split.Panel2MinSize = 180;
+            _grid.Margin = new Padding(18, 6, 18, 8);
+            main.Controls.Add(_grid, 0, 1);
 
             _cboView.SelectedIndexChanged += delegate { RefreshChart(); };
             _cboMetric.SelectedIndexChanged += delegate { RefreshChart(); };
             _btnRefresh.Click += delegate { LoadData(); };
-            _btnOpenDir.Click += delegate
+            _btnOpen.Click += delegate
             {
                 try
                 {
@@ -606,29 +988,144 @@ namespace CodexUsageViewer
                 catch (Exception ex) { MessageBox.Show(this, "无法打开目录: " + ex.Message, "提示"); }
             };
         }
-
-        Panel MakeCard(string title, out Label valueLabel, Color accent)
+        StatCard MakeCard(string title, Color accent, out StatCard card)
         {
-            Panel p = new Panel();
-            p.Margin = new Padding(4);
-            p.BackColor = Color.White;
-            p.Padding = new Padding(8, 4, 4, 2);
-            Label t = new Label();
-            t.Text = title;
-            t.ForeColor = Color.FromArgb(120, 130, 145);
-            t.Font = new Font("Microsoft YaHei UI", 8.5f);
-            t.Dock = DockStyle.Top;
-            t.Height = 22;
-            Label v = new Label();
-            v.Text = "-";
-            v.ForeColor = accent;
-            v.Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold);
-            v.Dock = DockStyle.Fill;
-            v.TextAlign = ContentAlignment.MiddleLeft;
-            p.Controls.Add(v);
-            p.Controls.Add(t);
-            valueLabel = v;
-            return p;
+            card = new StatCard(title, accent);
+            card.Margin = new Padding(4);
+            card.Dock = DockStyle.Fill;
+            return card;
+        }
+
+        ComboBox MakeCombo(object[] items)
+        {
+            ComboBox cb = new ComboBox();
+            cb.DropDownStyle = ComboBoxStyle.DropDownList;
+            cb.FlatStyle = FlatStyle.Flat;
+            cb.Font = Ui.F(9.5f, false);
+            cb.BackColor = Color.White;
+            cb.Height = 28;
+            cb.Items.AddRange(items);
+            cb.SelectedIndex = 0;
+            return cb;
+        }
+
+        DataGridView MakeGrid()
+        {
+            DataGridView g = new DataGridView();
+            g.ReadOnly = true;
+            g.AllowUserToAddRows = false;
+            g.AllowUserToDeleteRows = false;
+            g.AllowUserToResizeRows = false;
+            g.RowHeadersVisible = false;
+            g.BorderStyle = BorderStyle.None;
+            g.BackgroundColor = Color.White;
+            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            g.MultiSelect = false;
+            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            g.EnableHeadersVisualStyles = false;
+            g.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            g.ColumnHeadersHeight = 34;
+            g.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(255, 241, 245, 250);
+            g.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(255, 71, 85, 105);
+            g.ColumnHeadersDefaultCellStyle.Font = Ui.F(9f, true);
+            g.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+            g.DefaultCellStyle.BackColor = Color.White;
+            g.DefaultCellStyle.ForeColor = Color.FromArgb(255, 31, 41, 55);
+            g.DefaultCellStyle.Font = Ui.F(9f, false);
+            g.DefaultCellStyle.SelectionBackColor = Color.FromArgb(255, 232, 240, 254);
+            g.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 30, 41, 59);
+            g.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(255, 248, 250, 253);
+            g.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            g.GridColor = Color.FromArgb(255, 238, 242, 248);
+            return g;
+        }
+
+        void ToggleMax()
+        {
+            if (WindowState == FormWindowState.Maximized) WindowState = FormWindowState.Normal;
+            else WindowState = FormWindowState.Maximized;
+            _btnMax.Invalidate();
+            ApplyRegion();
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool ReleaseCapture();
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern IntPtr SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+
+        void DragWindow()
+        {
+            ReleaseCapture();
+            SendMessage(Handle, 0xA1, 2, 0);
+        }
+
+        void ApplyRegion()
+        {
+            if (WindowState == FormWindowState.Maximized)
+            {
+                Region = null;
+            }
+            else
+            {
+                using (GraphicsPath p = Ui.Round(new RectangleF(0, 0, Width, Height), 14f))
+                    Region = new Region(p);
+            }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            ApplyRegion();
+        }
+
+        void OnShownOnce()
+        {
+            ApplyRegion();
+            LoadData();
+            if (!String.IsNullOrEmpty(AutoShotPath))
+            {
+                try
+                {
+                    Application.DoEvents();
+                    System.Threading.Thread.Sleep(700);
+                    Application.DoEvents();
+                    using (Bitmap bmp = new Bitmap(Width, Height))
+                    {
+                        DrawToBitmap(bmp, new Rectangle(0, 0, Width, Height));
+                        bmp.Save(AutoShotPath, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                }
+                catch { }
+                Close();
+            }
+        }
+
+        const int WM_NCHITTEST = 0x84;
+        const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14,
+                  HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_NCHITTEST && WindowState == FormWindowState.Normal)
+            {
+                base.WndProc(ref m);
+                int x = (short)(m.LParam.ToInt64() & 0xFFFF);
+                int y = (short)((m.LParam.ToInt64() >> 16) & 0xFFFF);
+                Point p = PointToClient(new Point(x, y));
+                int edge = 7;
+                bool l = p.X < edge, r = p.X > Width - edge;
+                bool t = p.Y < edge, b = p.Y > Height - edge;
+                if (t && l) m.Result = (IntPtr)HTTOPLEFT;
+                else if (t && r) m.Result = (IntPtr)HTTOPRIGHT;
+                else if (b && l) m.Result = (IntPtr)HTBOTTOMLEFT;
+                else if (b && r) m.Result = (IntPtr)HTBOTTOMRIGHT;
+                else if (l) m.Result = (IntPtr)HTLEFT;
+                else if (r) m.Result = (IntPtr)HTRIGHT;
+                else if (t) m.Result = (IntPtr)HTTOP;
+                else if (b) m.Result = (IntPtr)HTBOTTOM;
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         void LoadData()
@@ -643,8 +1140,8 @@ namespace CodexUsageViewer
                 UpdateStats();
                 FillGrid();
                 RefreshChart();
-                _lblStatus.Text = "已加载: " + d.FileCount.ToString() + " 个文件, " + d.Records.Count.ToString() + " 条用量记录" +
-                    (d.Errors.Count > 0 ? " (" + d.Errors.Count.ToString() + " 个警告)" : "") + " | 耗时 " + ms.ToString("0") + " ms | " + _dataDir;
+                _lblStatus.Text = "已加载 " + d.FileCount.ToString() + " 个文件 / " + d.Records.Count.ToString() + " 条记录" +
+                    (d.Errors.Count > 0 ? "（" + d.Errors.Count.ToString() + " 个警告）" : "") + " · 耗时 " + ms.ToString("0") + " ms · " + _dataDir;
                 if (d.Errors.Count > 0 && d.Records.Count == 0)
                     MessageBox.Show(this, "未读取到有效记录。\n" + String.Join("\n", d.Errors), "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
@@ -665,15 +1162,15 @@ namespace CodexUsageViewer
                 total += r.Total; inp += r.Input; outp += r.Output; cached += r.Cached; reas += r.Reasoning;
                 threads.Add(r.ThreadId);
             }
-            _lblTotal.Text = Short(total);
-            _lblInput.Text = Short(inp);
-            _lblOutput.Text = Short(outp);
-            _lblCached.Text = Short(cached);
-            _lblReasoning.Text = Short(reas);
-            _lblSessions.Text = threads.Count.ToString();
-            _lblRange.Text = (_data.Records.Count > 0)
-                ? _data.MinTime.ToLocalTime().ToString("yyyy-MM-dd") + " ~ " + _data.MaxTime.ToLocalTime().ToString("yyyy-MM-dd")
-                : "-";
+            _cardTotal.SetValue(Short(total));
+            _cardInput.SetValue(Short(inp));
+            _cardOutput.SetValue(Short(outp));
+            _cardCached.SetValue(Short(cached));
+            _cardReason.SetValue(Short(reas));
+            _cardThreads.SetValue(threads.Count.ToString());
+            _cardRange.SetValue(_data.Records.Count > 0
+                ? _data.MinTime.ToLocalTime().ToString("yyyy-MM-dd") + " ~ " + _data.MaxTime.ToLocalTime().ToString("MM-dd")
+                : "-");
         }
 
         static string Short(long v)
@@ -684,67 +1181,58 @@ namespace CodexUsageViewer
             return v.ToString("N0");
         }
 
-        long Pick(UsageRecord r, int metric)
-        {
-            switch (metric)
-            {
-                case 1: return r.Input;
-                case 2: return r.Output;
-                case 3: return r.Cached;
-                case 4: return r.Reasoning;
-                default: return r.Total;
-            }
-        }
-
         void RefreshChart()
         {
             if (_data == null) return;
             int view = _cboView.SelectedIndex;
             int metric = _cboMetric.SelectedIndex;
             List<ChartItem> items = new List<ChartItem>();
-            string title = "";
-            string metricName = _cboMetric.Text;
+            string title = _cboMetric.Text + "用量";
 
             if (view == 0)
             {
-                foreach (DayAgg a in UsageLoader.AggregateByDay(_data))
+                List<DayAgg> days = UsageLoader.AggregateByDay(_data);
+                for (int i = 0; i < days.Count; i++)
                 {
-                    long v = 0;
-                    switch (metric) { case 1: v = a.Input; break; case 2: v = a.Output; break; case 3: v = a.Cached; break; case 4: v = a.Reasoning; break; default: v = a.Total; break; }
-                    items.Add(new ChartItem(a.Day.ToString("MM-dd"), v));
+                    DayAgg a = days[i];
+                    long v = PickDay(a, metric);
+                    string lab = (days.Count > 14) ? a.Day.ToString("MM-dd") : a.Day.ToString("M月d日");
+                    items.Add(new ChartItem(lab, v));
                 }
-                title = "按天 · " + metricName + " 用量";
+                title = "按天 · " + _cboMetric.Text;
             }
             else
             {
                 foreach (ThreadAgg a in UsageLoader.AggregateByThread(_data))
                 {
-                    long v = 0;
-                    switch (metric) { case 1: v = a.Input; break; case 2: v = a.Output; break; case 3: v = a.Cached; break; case 4: v = a.Reasoning; break; default: v = a.Total; break; }
-                    items.Add(new ChartItem(a.Name ?? UsageLoader.ShortId(a.ThreadId), v));
+                    items.Add(new ChartItem(a.Name ?? UsageLoader.ShortId(a.ThreadId), PickThread(a, metric)));
                 }
-                title = "按会话 · " + metricName + " 用量";
+                title = "按会话 · " + _cboMetric.Text;
             }
             _chart.SetItems(items, title);
+        }
+
+        long PickDay(DayAgg a, int metric)
+        {
+            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
+        }
+        long PickThread(ThreadAgg a, int metric)
+        {
+            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
         }
 
         void FillGrid()
         {
             _grid.SuspendLayout();
             _grid.Columns.Clear();
-            _grid.Columns.Add("time", "时间");
-            _grid.Columns.Add("thread", "会话");
-            _grid.Columns.Add("inp", "输入");
-            _grid.Columns.Add("cached", "缓存读取");
-            _grid.Columns.Add("out", "输出");
-            _grid.Columns.Add("reason", "推理");
-            _grid.Columns.Add("total", "总量");
-            foreach (DataGridViewColumn c in _grid.Columns)
-            {
-                if (c.Name == "thread") c.FillWeight = 200;
-                else if (c.Name == "time") c.FillWeight = 130;
-                else c.FillWeight = 60;
-            }
+            AddCol("time", "时间", 150, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("thread", "会话", 260, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol("inp", "输入", 90, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("cached", "缓存读取", 90, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("out", "输出", 90, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("reason", "推理", 90, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol("total", "总量", 100, DataGridViewContentAlignment.MiddleRight, true);
+
             List<UsageRecord> sorted = new List<UsageRecord>();
             if (_data != null)
             {
@@ -765,6 +1253,25 @@ namespace CodexUsageViewer
                 }
             }
             _grid.ResumeLayout();
+        }
+
+        void AddCol(string name, string header, float fill, DataGridViewContentAlignment align, bool numeric)
+        {
+            DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+            c.Name = name;
+            c.HeaderText = header;
+            c.FillWeight = fill;
+            c.SortMode = DataGridViewColumnSortMode.NotSortable;
+            if (numeric)
+            {
+                c.DefaultCellStyle.Alignment = align;
+                c.DefaultCellStyle.Format = "N0";
+            }
+            else
+            {
+                c.DefaultCellStyle.Alignment = align;
+            }
+            _grid.Columns.Add(c);
         }
     }
 }
