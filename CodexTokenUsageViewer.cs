@@ -750,6 +750,7 @@ namespace CodexUsageViewer
         int _hover = -1;
         double _anim = 1.0;
         bool _lineMode = false;
+        public Action<int> ItemClicked;   // 点击某个柱/点时回调索引
         Timer _timer;
         static readonly Color C_TOP = Color.FromArgb(255, 110, 168, 255);
         static readonly Color C_BOT = Color.FromArgb(255, 79, 124, 255);
@@ -793,6 +794,16 @@ namespace CodexUsageViewer
         {
             base.OnMouseLeave(e);
             if (_hover != -1) { _hover = -1; Invalidate(); }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button == MouseButtons.Left && ItemClicked != null)
+            {
+                int idx = HitTest(e.X, e.Y);
+                if (idx >= 0) ItemClicked(idx);
+            }
         }
 
         int HitTest(int x, int y)
@@ -1248,13 +1259,15 @@ namespace CodexUsageViewer
         StatCard _cardTotal, _cardTasks, _cardPerTask, _cardInput, _cardOutput, _cardCached, _cardReason, _cardThreads;
         ComboBox _cboView, _cboMetric, _cboAgent;
         ChartView _chart;
-        DataGridView _grid;
-        ModernButton _btnRefresh, _btnOpen;
+        DataGridView _taskGrid;
+        ModernButton _btnRefresh, _btnOpen, _btnDeep;
         Label _lblStatus;
         CaptionButton _btnMax;
+        Stack<Control> _stack = new Stack<Control>();
+        Panel _pageHost;
+        Control _overviewPage;
 
         static readonly Color BG = Color.FromArgb(255, 244, 246, 251);
-        static readonly Color CARD_BORDER = Color.FromArgb(255, 231, 236, 245);
         static readonly Color INK = Color.FromArgb(255, 31, 41, 55);
         static readonly Color SUB = Color.FromArgb(255, 130, 142, 160);
 
@@ -1276,21 +1289,20 @@ namespace CodexUsageViewer
             MinimumSize = new Size(980, 640);
             DoubleBuffered = true;
 
-            // 根布局：显式分行，避免 Dock 顺序歧义
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
             root.ColumnCount = 1;
             root.RowCount = 6;
             root.BackColor = BG;
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46f));   // 标题栏
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62f));   // 顶部操作行
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104f));  // 统计卡片
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52f));   // 筛选工具行
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));   // 底部状态
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));   // 图表 + 表格
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46f));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62f));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104f));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52f));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
             Controls.Add(root);
 
-            // ---- 第 0 行：标题栏 ----
+            // ---- 标题栏 ----
             Panel titleBar = new Panel();
             titleBar.Dock = DockStyle.Fill;
             titleBar.BackColor = Color.White;
@@ -1309,7 +1321,7 @@ namespace CodexUsageViewer
             titleBar.Controls.Add(appTitle);
 
             Label ver = new Label();
-            ver.Text = "v1.4";
+            ver.Text = "v2.0";
             ver.Font = Ui.F(8.5f, false);
             ver.ForeColor = Color.FromArgb(255, 79, 124, 255);
             ver.AutoSize = true;
@@ -1335,13 +1347,12 @@ namespace CodexUsageViewer
                 _btnMax.Left = w - 92;
                 btnMin.Left = w - 138;
             };
-
             titleBar.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
             titleBar.MouseDoubleClick += delegate { ToggleMax(); };
             appTitle.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
             ver.MouseDown += delegate(object s, MouseEventArgs e2) { if (e2.Button == MouseButtons.Left) DragWindow(); };
 
-            // ---- 第 1 行：顶部操作行 ----
+            // ---- 顶部操作行 ----
             Panel header = new Panel();
             header.Dock = DockStyle.Fill;
             header.BackColor = BG;
@@ -1363,22 +1374,27 @@ namespace CodexUsageViewer
             hSub.Location = new Point(26, 36);
             header.Controls.Add(hSub);
 
+            _btnDeep = new ModernButton("DeepSeek 用量", BtnKind.Secondary);
+            _btnDeep.Size = new Size(124, 34);
             _btnOpen = new ModernButton("打开数据目录", BtnKind.Secondary);
-            _btnOpen.Size = new Size(132, 34);
+            _btnOpen.Size = new Size(128, 34);
             _btnRefresh = new ModernButton("刷新数据", BtnKind.Primary);
-            _btnRefresh.Size = new Size(116, 34);
-            _btnRefresh.Location = new Point(0, 14);
+            _btnRefresh.Size = new Size(112, 34);
+            _btnDeep.Location = new Point(0, 14);
             _btnOpen.Location = new Point(0, 14);
-            header.Controls.Add(_btnRefresh);
+            _btnRefresh.Location = new Point(0, 14);
+            header.Controls.Add(_btnDeep);
             header.Controls.Add(_btnOpen);
+            header.Controls.Add(_btnRefresh);
             header.Resize += delegate
             {
                 int w = header.Width;
-                _btnOpen.Left = w - 24 - 132;
-                _btnRefresh.Left = w - 24 - 132 - 12 - 116;
+                _btnRefresh.Left = w - 24 - 112;
+                _btnOpen.Left = w - 24 - 112 - 12 - 128;
+                _btnDeep.Left = w - 24 - 112 - 12 - 128 - 12 - 124;
             };
 
-            // ---- 第 2 行：统计卡片 ----
+            // ---- 统计卡片 ----
             TableLayoutPanel stats = new TableLayoutPanel();
             stats.Dock = DockStyle.Fill;
             stats.BackColor = BG;
@@ -1396,7 +1412,7 @@ namespace CodexUsageViewer
             stats.Controls.Add(MakeCard("推理 tokens", Color.FromArgb(255, 167, 139, 250), out _cardReason), 6, 0);
             stats.Controls.Add(MakeCard("会话数", Color.FromArgb(255, 148, 163, 184), out _cardThreads), 7, 0);
 
-            // ---- 第 3 行：筛选工具行 ----
+            // ---- 筛选工具行 ----
             Panel tools = new Panel();
             tools.Dock = DockStyle.Fill;
             tools.BackColor = BG;
@@ -1412,7 +1428,7 @@ namespace CodexUsageViewer
             _cboAgent = MakeCombo(new object[] { "全部", "Codex", "Claude" });
             _cboAgent.Location = new Point(452, 10); _cboAgent.Width = 108;
             Label hint = new Label();
-            hint.Text = "悬停柱状图查看精确数值";
+            hint.Text = "点击图表或任务行查看详情";
             hint.Font = Ui.F(8.5f, false);
             hint.ForeColor = SUB;
             hint.AutoSize = true;
@@ -1420,7 +1436,7 @@ namespace CodexUsageViewer
             tools.Controls.Add(lv); tools.Controls.Add(_cboView); tools.Controls.Add(lm); tools.Controls.Add(_cboMetric); tools.Controls.Add(la); tools.Controls.Add(_cboAgent); tools.Controls.Add(hint);
             tools.Resize += delegate { hint.Left = tools.Width - 24 - hint.Width; };
 
-            // ---- 第 4 行：底部状态 ----
+            // ---- 底部状态 ----
             Panel footer = new Panel();
             footer.Dock = DockStyle.Fill;
             footer.BackColor = BG;
@@ -1433,25 +1449,14 @@ namespace CodexUsageViewer
             _lblStatus.Location = new Point(26, 5);
             footer.Controls.Add(_lblStatus);
 
-            // ---- 第 5 行：图表 + 表格 ----
-            TableLayoutPanel main = new TableLayoutPanel();
-            main.Dock = DockStyle.Fill;
-            main.BackColor = BG;
-            main.ColumnCount = 1;
-            main.RowCount = 2;
-            main.RowStyles.Add(new RowStyle(SizeType.Percent, 54f));
-            main.RowStyles.Add(new RowStyle(SizeType.Percent, 46f));
-            root.Controls.Add(main, 0, 5);
-
-            _chart = new ChartView();
-            _chart.Dock = DockStyle.Fill;
-            _chart.Margin = new Padding(18, 0, 18, 6);
-            main.Controls.Add(_chart, 0, 0);
-
-            _grid = MakeGrid();
-            _grid.Dock = DockStyle.Fill;
-            _grid.Margin = new Padding(18, 6, 18, 8);
-            main.Controls.Add(_grid, 0, 1);
+            // ---- 主内容：栈式页面宿主 ----
+            _pageHost = new Panel();
+            _pageHost.Dock = DockStyle.Fill;
+            _pageHost.BackColor = BG;
+            root.Controls.Add(_pageHost, 0, 5);
+            _overviewPage = BuildOverviewPage();
+            _pageHost.Controls.Add(_overviewPage);
+            _stack.Push(_overviewPage);
 
             _cboView.SelectedIndexChanged += delegate { RefreshChart(); };
             _cboMetric.SelectedIndexChanged += delegate { RefreshChart(); };
@@ -1466,6 +1471,96 @@ namespace CodexUsageViewer
                 }
                 catch (Exception ex) { MessageBox.Show(this, "无法打开目录: " + ex.Message, "提示"); }
             };
+            _btnDeep.Click += delegate
+            {
+                try { System.Diagnostics.Process.Start("https://platform.deepseek.com/usage"); }
+                catch (Exception ex) { MessageBox.Show(this, "无法打开浏览器: " + ex.Message, "提示"); }
+            };
+        }
+
+        // ---- 栈式导航 ----
+        public void PushPage(Control page)
+        {
+            _pageHost.Controls.Clear();
+            page.Dock = DockStyle.Fill;
+            _pageHost.Controls.Add(page);
+            _stack.Push(page);
+        }
+
+        public void PopPage()
+        {
+            if (_stack.Count <= 1) return;
+            _stack.Pop();
+            Control top = _stack.Peek();
+            _pageHost.Controls.Clear();
+            _pageHost.Controls.Add(top);
+        }
+
+        Control BuildOverviewPage()
+        {
+            TableLayoutPanel main = new TableLayoutPanel();
+            main.Dock = DockStyle.Fill;
+            main.BackColor = BG;
+            main.ColumnCount = 1;
+            main.RowCount = 2;
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 52f));
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 48f));
+
+            _chart = new ChartView();
+            _chart.Dock = DockStyle.Fill;
+            _chart.Margin = new Padding(18, 0, 18, 6);
+            _chart.ItemClicked = OnChartItemClick;
+            main.Controls.Add(_chart, 0, 0);
+
+            _taskGrid = MakeGrid();
+            _taskGrid.Dock = DockStyle.Fill;
+            _taskGrid.Margin = new Padding(18, 6, 18, 8);
+            _taskGrid.CellDoubleClick += delegate { OpenSelectedTask(); };
+            main.Controls.Add(_taskGrid, 0, 1);
+            return main;
+        }
+
+        void OnChartItemClick(int idx)
+        {
+            if (_data == null || idx < 0) return;
+            int view = _cboView.SelectedIndex;
+            int metric = _cboMetric.SelectedIndex;
+
+            if (view == 0)
+            {
+                List<DayAgg> days = UsageLoader.AggregateByDay(_data);
+                if (idx >= days.Count) return;
+                DateTime day = days[idx].Day;
+                List<AgentTask> tasks = _data.Tasks.Where(t => t.Time.ToLocalTime().Date == day).OrderBy(t => t.Time).ToList();
+                PushPage(new TaskListPage(this, "每日详情 · " + day.ToString("yyyy-MM-dd"), tasks, _data));
+            }
+            else if (view == 1)
+            {
+                List<ThreadAgg> ths = UsageLoader.AggregateByThread(_data);
+                if (idx >= ths.Count) return;
+                ThreadAgg a = ths[idx];
+                List<UsageRecord> recs = _data.Records.Where(r => r.Agent == a.Agent && r.ThreadId == a.ThreadId).OrderBy(r => r.Time).ToList();
+                PushPage(new RecordListPage(this, "会话详情 · " + a.Name, recs, _data));
+            }
+            else if (view == 3)
+            {
+                List<ModelAgg> ms = UsageLoader.AggregateByModel(_data);
+                if (idx >= ms.Count) return;
+                ModelAgg m = ms[idx];
+                List<UsageRecord> recs = _data.Records.Where(r => (String.IsNullOrEmpty(r.Model) ? "(未知模型)" : r.Model) == m.Model).OrderBy(r => r.Time).ToList();
+                PushPage(new RecordListPage(this, "模型详情 · " + m.Model, recs, _data));
+            }
+            else
+            {
+                List<TrendPoint> tr = UsageLoader.AggregateTrend(_data);
+                if (idx >= tr.Count) return;
+                TrendPoint p = tr[idx];
+                DateTime from = p.T, to = from.AddHours(1);
+                bool multi = tr.Count > 0 && (tr[tr.Count - 1].T.Date != tr[0].T.Date);
+                if (multi) { to = from.Date.AddDays(1); }
+                List<UsageRecord> recs = _data.Records.Where(r => { DateTime lt = r.Time.ToLocalTime(); return lt >= from && lt < to; }).OrderBy(r => r.Time).ToList();
+                PushPage(new RecordListPage(this, "时段详情 · " + p.T.ToString(multi ? "yyyy-MM-dd" : "MM-dd HH:00"), recs, _data));
+            }
         }
         StatCard MakeCard(string title, Color accent, out StatCard card)
         {
@@ -1517,6 +1612,27 @@ namespace CodexUsageViewer
             g.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
             g.GridColor = Color.FromArgb(255, 238, 242, 248);
             return g;
+        }
+
+        void OpenSelectedTask()
+        {
+            if (_taskGrid == null || _taskGrid.SelectedRows.Count == 0) return;
+            AgentTask t = _taskGrid.SelectedRows[0].Tag as AgentTask;
+            if (t != null) PushPage(new TaskDetailPage(this, t, _data));
+        }
+
+        void TaskStats(AgentTask t, out int calls, out long total, out string model)
+        {
+            calls = 0; total = 0; model = "";
+            if (_data == null) return;
+            foreach (UsageRecord r in _data.Records)
+            {
+                if (r.Agent == t.Agent && r.TurnId == t.TaskId)
+                {
+                    calls++; total += r.Total;
+                    if (String.IsNullOrEmpty(model)) model = r.Model;
+                }
+            }
         }
 
         void ToggleMax()
@@ -1617,8 +1733,7 @@ namespace CodexUsageViewer
                 _fullData = UsageLoader.LoadAll(_dataDir);
                 ApplyAgentFilter();
                 double ms = (DateTime.UtcNow - sw).TotalMilliseconds;
-                if (_fullData != null)
-                    _lblStatus.Text = _lblStatus.Text + " · 扫描耗时 " + ms.ToString("0") + " ms";
+                _lblStatus.Text = _lblStatus.Text + " · 扫描 " + ms.ToString("0") + " ms";
                 if (_fullData != null && _fullData.Errors.Count > 0 && _fullData.Records.Count == 0)
                     MessageBox.Show(this, "未读取到有效记录。\n" + String.Join("\n", _fullData.Errors), "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
@@ -1634,26 +1749,23 @@ namespace CodexUsageViewer
             if (_fullData == null) return;
             string agent = (_cboAgent.SelectedItem != null) ? _cboAgent.SelectedItem.ToString() : "全部";
             _data = UsageLoader.FilterByAgent(_fullData, agent);
+            // 回到总览页（栈顶）
+            ResetToOverview();
             UpdateStats();
-            FillGrid();
+            FillTaskGrid();
             RefreshChart();
             UpdateStatus();
         }
 
-        void UpdateStatus()
+        void ResetToOverview()
         {
-            if (_data == null) return;
-            long total = 0;
-            foreach (UsageRecord r in _data.Records) total += r.Total;
-            string range = _data.Records.Count > 0
-                ? _data.MinTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " ~ " + _data.MaxTime.ToLocalTime().ToString("MM-dd HH:mm")
-                : "";
-            string agents = String.Join("/", _data.Records.Select(r => r.Agent).Distinct());
-            _lblStatus.Text = "Agent: " + (agents.Length == 0 ? "-" : agents) + " · 任务 " + _data.Tasks.Count.ToString()
-                + " · 记录 " + _data.Records.Count.ToString() + " · 文件 " + _data.FileCount.ToString()
-                + (_data.Records.Count > 0 ? " · " + range : "")
-                + (_data.Errors.Count > 0 ? "（" + _data.Errors.Count.ToString() + " 警告）" : "");
+            if (_overviewPage == null) return;
+            _stack.Clear();
+            _pageHost.Controls.Clear();
+            _pageHost.Controls.Add(_overviewPage);
+            _stack.Push(_overviewPage);
         }
+
         void UpdateStats()
         {
             if (_data == null) return;
@@ -1674,6 +1786,18 @@ namespace CodexUsageViewer
             _cardReason.SetValue(Short(reas));
             _cardThreads.SetValue(threads.Count.ToString());
         }
+
+        void UpdateStatus()
+        {
+            if (_data == null) return;
+            long total = 0;
+            foreach (UsageRecord r in _data.Records) total += r.Total;
+            string agents = String.Join("/", _data.Records.Select(r => r.Agent).Distinct());
+            _lblStatus.Text = "Agent: " + (agents.Length == 0 ? "-" : agents) + " · 任务 " + _data.Tasks.Count.ToString()
+                + " · 记录 " + _data.Records.Count.ToString() + " · 文件 " + _data.FileCount.ToString()
+                + (_data.Errors.Count > 0 ? "（" + _data.Errors.Count.ToString() + " 警告）" : "");
+        }
+
         static string Short(long v)
         {
             if (v >= 1000000000L) return (v / 1000000000.0).ToString("0.00") + "B";
@@ -1733,62 +1857,48 @@ namespace CodexUsageViewer
             _chart.SetItems(items, title, line);
         }
 
-        long PickDay(DayAgg a, int metric)
-        {
-            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
-        }
-        long PickThread(ThreadAgg a, int metric)
-        {
-            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
-        }
-        long PickModel(ModelAgg a, int metric)
-        {
-            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
-        }
-        long PickTrend(TrendPoint a, int metric)
-        {
-            switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; }
-        }
+        long PickDay(DayAgg a, int metric) { switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; } }
+        long PickThread(ThreadAgg a, int metric) { switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; } }
+        long PickModel(ModelAgg a, int metric) { switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; } }
+        long PickTrend(TrendPoint a, int metric) { switch (metric) { case 1: return a.Input; case 2: return a.Output; case 3: return a.Cached; case 4: return a.Reasoning; default: return a.Total; } }
 
-        void FillGrid()
+        void FillTaskGrid()
         {
-            _grid.SuspendLayout();
-            _grid.Columns.Clear();
-            AddCol("agent", "Agent", 48, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("model", "模型", 95, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("time", "时间", 125, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("thread", "会话", 185, DataGridViewContentAlignment.MiddleLeft, false);
-            AddCol("inp", "输入", 65, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("cached", "缓存读取", 70, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("out", "输出", 65, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("reason", "推理", 65, DataGridViewContentAlignment.MiddleRight, true);
-            AddCol("total", "总量", 75, DataGridViewContentAlignment.MiddleRight, true);
+            _taskGrid.SuspendLayout();
+            _taskGrid.Columns.Clear();
+            AddCol(_taskGrid, "time", "时间", 130, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol(_taskGrid, "agent", "Agent", 55, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol(_taskGrid, "thread", "会话", 200, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol(_taskGrid, "model", "模型", 110, DataGridViewContentAlignment.MiddleLeft, false);
+            AddCol(_taskGrid, "calls", "调用数", 65, DataGridViewContentAlignment.MiddleRight, true);
+            AddCol(_taskGrid, "total", "总 Tokens", 90, DataGridViewContentAlignment.MiddleRight, true);
 
-            List<UsageRecord> sorted = new List<UsageRecord>();
+            List<AgentTask> tasks = new List<AgentTask>();
             if (_data != null)
             {
-                sorted.AddRange(_data.Records);
-                sorted.Sort((x, y) => y.Time.CompareTo(x.Time));
-                if (sorted.Count > 5000) sorted = sorted.GetRange(0, 5000);
-                _grid.Rows.Clear();
-                foreach (UsageRecord r in sorted)
+                tasks.AddRange(_data.Tasks);
+                tasks.Sort((x, y) => y.Time.CompareTo(x.Time));
+                if (tasks.Count > 5000) tasks = tasks.GetRange(0, 5000);
+                _taskGrid.Rows.Clear();
+                foreach (AgentTask t in tasks)
                 {
-                    int i = _grid.Rows.Add();
-                    _grid.Rows[i].Cells[0].Value = r.Agent;
-                    _grid.Rows[i].Cells[1].Value = String.IsNullOrEmpty(r.Model) ? "?" : r.Model;
-                    _grid.Rows[i].Cells[2].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-                    _grid.Rows[i].Cells[3].Value = UsageLoader.ThreadLabel(_data, r.Agent, r.ThreadId);
-                    _grid.Rows[i].Cells[4].Value = r.Input.ToString("N0");
-                    _grid.Rows[i].Cells[5].Value = r.Cached.ToString("N0");
-                    _grid.Rows[i].Cells[6].Value = r.Output.ToString("N0");
-                    _grid.Rows[i].Cells[7].Value = r.Reasoning.ToString("N0");
-                    _grid.Rows[i].Cells[8].Value = r.Total.ToString("N0");
+                    int calls; long total; string model;
+                    TaskStats(t, out calls, out total, out model);
+                    string tname = UsageLoader.ThreadLabel(_data, t.Agent, t.ThreadId);
+                    int i = _taskGrid.Rows.Add();
+                    _taskGrid.Rows[i].Cells[0].Value = t.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                    _taskGrid.Rows[i].Cells[1].Value = t.Agent;
+                    _taskGrid.Rows[i].Cells[2].Value = tname;
+                    _taskGrid.Rows[i].Cells[3].Value = String.IsNullOrEmpty(model) ? "?" : model;
+                    _taskGrid.Rows[i].Cells[4].Value = calls.ToString("N0");
+                    _taskGrid.Rows[i].Cells[5].Value = total.ToString("N0");
+                    _taskGrid.Rows[i].Tag = t;
                 }
             }
-            _grid.ResumeLayout();
+            _taskGrid.ResumeLayout();
         }
 
-        void AddCol(string name, string header, float fill, DataGridViewContentAlignment align, bool numeric)
+        void AddCol(DataGridView g, string name, string header, float fill, DataGridViewContentAlignment align, bool numeric)
         {
             DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
             c.Name = name;
@@ -1797,7 +1907,254 @@ namespace CodexUsageViewer
             c.SortMode = DataGridViewColumnSortMode.NotSortable;
             c.DefaultCellStyle.Alignment = align;
             if (numeric) c.DefaultCellStyle.Format = "N0";
-            _grid.Columns.Add(c);
+            g.Columns.Add(c);
+        }
+    }
+    // ---------- 页面共享样式 ----------
+    static class PageUi
+    {
+        public static readonly Color BG = Color.FromArgb(255, 244, 246, 251);
+        public static readonly Color INK = Color.FromArgb(255, 31, 41, 55);
+        public static readonly Color SUB = Color.FromArgb(255, 130, 142, 160);
+
+        public static DataGridView MakeGrid()
+        {
+            DataGridView g = new DataGridView();
+            g.ReadOnly = true;
+            g.AllowUserToAddRows = false;
+            g.AllowUserToDeleteRows = false;
+            g.AllowUserToResizeRows = false;
+            g.RowHeadersVisible = false;
+            g.BorderStyle = BorderStyle.None;
+            g.BackgroundColor = Color.White;
+            g.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            g.MultiSelect = false;
+            g.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            g.EnableHeadersVisualStyles = false;
+            g.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+            g.ColumnHeadersHeight = 34;
+            g.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(255, 241, 245, 250);
+            g.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(255, 71, 85, 105);
+            g.ColumnHeadersDefaultCellStyle.Font = Ui.F(9f, true);
+            g.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+            g.DefaultCellStyle.BackColor = Color.White;
+            g.DefaultCellStyle.ForeColor = Color.FromArgb(255, 31, 41, 55);
+            g.DefaultCellStyle.Font = Ui.F(9f, false);
+            g.DefaultCellStyle.SelectionBackColor = Color.FromArgb(255, 232, 240, 254);
+            g.DefaultCellStyle.SelectionForeColor = Color.FromArgb(255, 30, 41, 59);
+            g.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(255, 248, 250, 253);
+            g.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            g.GridColor = Color.FromArgb(255, 238, 242, 248);
+            return g;
+        }
+
+        public static void AddCol(DataGridView g, string name, string header, float fill, DataGridViewContentAlignment align, bool numeric)
+        {
+            DataGridViewTextBoxColumn c = new DataGridViewTextBoxColumn();
+            c.Name = name;
+            c.HeaderText = header;
+            c.FillWeight = fill;
+            c.SortMode = DataGridViewColumnSortMode.NotSortable;
+            c.DefaultCellStyle.Alignment = align;
+            if (numeric) c.DefaultCellStyle.Format = "N0";
+            g.Columns.Add(c);
+        }
+
+        public static Panel MakeHeader(MainForm owner, string title)
+        {
+            Panel top = new Panel();
+            top.Dock = DockStyle.Top;
+            top.Height = 54;
+            top.BackColor = BG;
+            ModernButton back = new ModernButton("← 返回", BtnKind.Secondary);
+            back.Size = new Size(92, 30);
+            back.Location = new Point(16, 12);
+            back.Click += delegate { owner.PopPage(); };
+            Label t = new Label();
+            t.Text = title;
+            t.Font = Ui.F(12f, true);
+            t.ForeColor = INK;
+            t.AutoSize = true;
+            t.Location = new Point(122, 16);
+            top.Controls.Add(back);
+            top.Controls.Add(t);
+            return top;
+        }
+    }
+
+    // ---------- 任务列表页（每日详情 / 单任务总览）----------
+    class TaskListPage : Panel
+    {
+        MainForm _owner;
+        UsageData _data;
+        List<AgentTask> _tasks;
+        DataGridView _grid;
+
+        public TaskListPage(MainForm owner, string title, List<AgentTask> tasks, UsageData data)
+        {
+            _owner = owner; _tasks = tasks; _data = data;
+            BackColor = PageUi.BG;
+            Controls.Add(PageUi.MakeHeader(owner, title));
+            _grid = PageUi.MakeGrid();
+            _grid.Dock = DockStyle.Fill;
+            _grid.CellDoubleClick += delegate { OpenSelected(); };
+            Controls.Add(_grid);
+            Build();
+        }
+
+        void StatOf(AgentTask t, out int calls, out long total, out string model)
+        {
+            calls = 0; total = 0; model = "";
+            if (_data == null) return;
+            foreach (UsageRecord r in _data.Records)
+                if (r.Agent == t.Agent && r.TurnId == t.TaskId)
+                {
+                    calls++; total += r.Total;
+                    if (String.IsNullOrEmpty(model)) model = r.Model;
+                }
+        }
+
+        void Build()
+        {
+            _grid.SuspendLayout();
+            PageUi.AddCol(_grid, "time", "时间", 125, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "agent", "Agent", 55, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "thread", "会话", 200, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "model", "模型", 110, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "calls", "调用数", 65, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "total", "总 Tokens", 90, DataGridViewContentAlignment.MiddleRight, true);
+            _grid.Rows.Clear();
+            foreach (AgentTask t in _tasks)
+            {
+                int calls; long total; string model;
+                StatOf(t, out calls, out total, out model);
+                int i = _grid.Rows.Add();
+                _grid.Rows[i].Cells[0].Value = t.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                _grid.Rows[i].Cells[1].Value = t.Agent;
+                _grid.Rows[i].Cells[2].Value = UsageLoader.ThreadLabel(_data, t.Agent, t.ThreadId);
+                _grid.Rows[i].Cells[3].Value = String.IsNullOrEmpty(model) ? "?" : model;
+                _grid.Rows[i].Cells[4].Value = calls.ToString("N0");
+                _grid.Rows[i].Cells[5].Value = total.ToString("N0");
+                _grid.Rows[i].Tag = t;
+            }
+            _grid.ResumeLayout();
+        }
+
+        void OpenSelected()
+        {
+            if (_grid.SelectedRows.Count == 0) return;
+            AgentTask t = _grid.SelectedRows[0].Tag as AgentTask;
+            if (t != null) _owner.PushPage(new TaskDetailPage(_owner, t, _data));
+        }
+    }
+
+    // ---------- 记录列表页（会话 / 模型 / 时段详情）----------
+    class RecordListPage : Panel
+    {
+        MainForm _owner;
+        UsageData _data;
+        List<UsageRecord> _records;
+        DataGridView _grid;
+
+        public RecordListPage(MainForm owner, string title, List<UsageRecord> records, UsageData data)
+        {
+            _owner = owner; _records = records; _data = data;
+            BackColor = PageUi.BG;
+            Controls.Add(PageUi.MakeHeader(owner, title + "（" + records.Count.ToString() + " 条）"));
+            _grid = PageUi.MakeGrid();
+            _grid.Dock = DockStyle.Fill;
+            Controls.Add(_grid);
+            Build();
+        }
+
+        void Build()
+        {
+            _grid.SuspendLayout();
+            PageUi.AddCol(_grid, "time", "时间", 130, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "model", "模型", 120, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "inp", "输入", 80, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "cached", "缓存读取", 85, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "out", "输出", 75, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "reason", "推理", 75, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "total", "总量", 90, DataGridViewContentAlignment.MiddleRight, true);
+            _grid.Rows.Clear();
+            foreach (UsageRecord r in _records)
+            {
+                int i = _grid.Rows.Add();
+                _grid.Rows[i].Cells[0].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                _grid.Rows[i].Cells[1].Value = String.IsNullOrEmpty(r.Model) ? "?" : r.Model;
+                _grid.Rows[i].Cells[2].Value = r.Input.ToString("N0");
+                _grid.Rows[i].Cells[3].Value = r.Cached.ToString("N0");
+                _grid.Rows[i].Cells[4].Value = r.Output.ToString("N0");
+                _grid.Rows[i].Cells[5].Value = r.Reasoning.ToString("N0");
+                _grid.Rows[i].Cells[6].Value = r.Total.ToString("N0");
+            }
+            _grid.ResumeLayout();
+        }
+    }
+
+    // ---------- 任务详情页 ----------
+    class TaskDetailPage : Panel
+    {
+        MainForm _owner;
+        UsageData _data;
+        AgentTask _task;
+        DataGridView _grid;
+
+        public TaskDetailPage(MainForm owner, AgentTask task, UsageData data)
+        {
+            _owner = owner; _task = task; _data = data;
+            BackColor = PageUi.BG;
+            Controls.Add(PageUi.MakeHeader(owner, "任务详情 · " + task.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")));
+            // 汇总条
+            Panel sum = new Panel();
+            sum.Dock = DockStyle.Top;
+            sum.Height = 40;
+            sum.BackColor = PageUi.BG;
+            Controls.Add(sum);
+            Label s1 = new Label();
+            s1.AutoSize = true;
+            s1.Font = Ui.F(9f, false);
+            s1.ForeColor = PageUi.SUB;
+            s1.Location = new Point(26, 12);
+            long total = 0; int calls = 0; string model = "?";
+            foreach (UsageRecord r in _data.Records)
+                if (r.Agent == _task.Agent && r.TurnId == _task.TaskId)
+                {
+                    calls++; total += r.Total;
+                    if (model == "?") model = String.IsNullOrEmpty(r.Model) ? "?" : r.Model;
+                }
+            s1.Text = "Agent " + _task.Agent + " · 会话 " + UsageLoader.ThreadLabel(_data, _task.Agent, _task.ThreadId)
+                + " · 模型 " + model + " · 调用 " + calls.ToString() + " 次 · 总 " + total.ToString("N0") + " tokens";
+            sum.Controls.Add(s1);
+            _grid = PageUi.MakeGrid();
+            _grid.Dock = DockStyle.Fill;
+            Controls.Add(_grid);
+            Build();
+        }
+
+        void Build()
+        {
+            _grid.SuspendLayout();
+            PageUi.AddCol(_grid, "time", "时间", 130, DataGridViewContentAlignment.MiddleLeft, false);
+            PageUi.AddCol(_grid, "inp", "输入", 80, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "cached", "缓存读取", 85, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "out", "输出", 75, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "reason", "推理", 75, DataGridViewContentAlignment.MiddleRight, true);
+            PageUi.AddCol(_grid, "total", "总量", 90, DataGridViewContentAlignment.MiddleRight, true);
+            _grid.Rows.Clear();
+            foreach (UsageRecord r in _data.Records)
+            {
+                if (r.Agent != _task.Agent || r.TurnId != _task.TaskId) continue;
+                int i = _grid.Rows.Add();
+                _grid.Rows[i].Cells[0].Value = r.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                _grid.Rows[i].Cells[1].Value = r.Input.ToString("N0");
+                _grid.Rows[i].Cells[2].Value = r.Cached.ToString("N0");
+                _grid.Rows[i].Cells[3].Value = r.Output.ToString("N0");
+                _grid.Rows[i].Cells[4].Value = r.Reasoning.ToString("N0");
+                _grid.Rows[i].Cells[5].Value = r.Total.ToString("N0");
+            }
+            _grid.ResumeLayout();
         }
     }
 }
