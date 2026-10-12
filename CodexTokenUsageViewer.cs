@@ -192,6 +192,7 @@ namespace CodexUsageViewer
             {
                 HashSet<string> doneTurns = new HashSet<string>();
                 string curModel = null;
+                string curThreadId = null;
                 try
                 {
                     using (FileStream fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -212,6 +213,15 @@ namespace CodexUsageViewer
                             if (type == "world_state" || type == "session_meta")
                                 md = TryExtractModel(root, type);
                             if (!String.IsNullOrEmpty(md)) curModel = md;
+                            if (type == "session_meta")
+                            {
+                                Dictionary<string, object> sp = GetDict(root, "payload");
+                                if (sp != null)
+                                {
+                                    string sid = GetStr(sp, "id") ?? GetStr(sp, "session_id");
+                                    if (!String.IsNullOrEmpty(sid)) curThreadId = sid;
+                                }
+                            }
 
                             if (type == "token_usage_record")
                             {
@@ -235,6 +245,7 @@ namespace CodexUsageViewer
                                         AgentTask t = new AgentTask();
                                         t.Agent = "Codex";
                                         t.ThreadId = GetStr(payload, "thread_id") ?? "";
+                                        t.ThreadId = curThreadId ?? "";
                                         t.TaskId = turnId;
                                         t.Time = ParseTime(GetStr(root, "timestamp"));
                                         data.Tasks.Add(t);
